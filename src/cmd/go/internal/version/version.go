@@ -20,6 +20,8 @@ import (
 	"cmd/go/internal/gover"
 )
 
+const Version = "1.0-nightly"
+
 var CmdVersion = &base.Command{
 	UsageLine: "go version [-m] [-v] [file ...]",
 	Short:     "print Go version",
@@ -78,7 +80,7 @@ func runVersion(ctx context.Context, cmd *base.Command, args []string) {
 		if gover.TestVersion != "" {
 			v = gover.TestVersion + " (TESTGO_VERSION)"
 		}
-		fmt.Printf("go version %s %s/%s\n", v, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("gosharp version %s\ngo version %s %s/%s\n", Version, v, runtime.GOOS, runtime.GOARCH)
 		return
 	}
 

@@ -1189,6 +1189,7 @@ loop:
 			p.next()
 			t.Fun = x
 			t.ArgList, t.HasDots = p.argList()
+			t.ImmReturn = p.immret
 			x = t
 
 		case _Lbrace:

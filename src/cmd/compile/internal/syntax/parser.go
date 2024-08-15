@@ -1187,9 +1187,9 @@ loop:
 			t := new(CallExpr)
 			t.pos = pos
 			p.next()
+			t.ImmReturn = p.immret
 			t.Fun = x
 			t.ArgList, t.HasDots = p.argList()
-			t.ImmReturn = p.immret
 			x = t
 
 		case _Lbrace:

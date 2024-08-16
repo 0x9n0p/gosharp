@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// This file implements syntax tree walking.
+// This file implements syntax tree walking and changing.
 
 package syntax
 
@@ -343,4 +343,325 @@ func (w walker) fieldList(list []*Field) {
 	for _, n := range list {
 		w.node(n)
 	}
+}
+
+func WalkAndChange(root Node, f func(*Node) bool) Node {
+	return ASTChanger{changer(f)}.node(root)
+}
+
+type changer func(*Node) bool
+
+func (v changer) Change(node *Node) NodeChanger {
+	if v(node) {
+		return v
+	}
+	return nil
+}
+
+type NodeChanger interface {
+	Change(node *Node) NodeChanger
+}
+
+type ASTChanger struct {
+	changer NodeChanger
+}
+
+func (c ASTChanger) node(o Node) Node {
+	if o == nil {
+		panic("nil node")
+	}
+
+	c.changer = c.changer.Change(&o)
+	if c.changer == nil {
+		return o
+	}
+
+	switch n := (o).(type) {
+	// packages
+	case *File:
+		n.PkgName = c.node(n.PkgName).(*Name)
+		n.DeclList = c.declList(n.DeclList)
+
+	// declarations
+	case *ImportDecl:
+		if n.LocalPkgName != nil {
+			n.LocalPkgName = c.node(n.LocalPkgName).(*Name)
+		}
+		n.Path = c.node(n.Path).(*BasicLit)
+
+	case *ConstDecl:
+		n.NameList = c.nameList(n.NameList)
+		if n.Type != nil {
+			n.Type = c.node(n.Type).(Expr)
+		}
+		if n.Values != nil {
+			n.Values = c.node(n.Values).(Expr)
+		}
+
+	case *TypeDecl:
+		n.Name = c.node(n.Name).(*Name)
+		n.TParamList = c.fieldList(n.TParamList)
+		n.Type = c.node(n.Type).(Expr)
+
+	case *VarDecl:
+		n.NameList = c.nameList(n.NameList)
+		if n.Type != nil {
+			n.Type = c.node(n.Type).(Expr)
+		}
+		if n.Values != nil {
+			n.Values = c.node(n.Values).(Expr)
+		}
+
+	case *FuncDecl:
+		if n.Recv != nil {
+			n.Recv = c.node(n.Recv).(*Field)
+		}
+		n.Name = c.node(n.Name).(*Name)
+		n.TParamList = c.fieldList(n.TParamList)
+		n.Type = c.node(n.Type).(*FuncType)
+		if n.Body != nil {
+			n.Body = c.node(n.Body).(*BlockStmt)
+		}
+
+	// expressions
+	case *BadExpr: // nothing to do
+	case *Name: // nothing to do
+	case *BasicLit: // nothing to do
+
+	case *CompositeLit:
+		if n.Type != nil {
+			n.Type = c.node(n.Type).(Expr)
+		}
+		n.ElemList = c.exprList(n.ElemList)
+
+	case *KeyValueExpr:
+		n.Key = c.node(n.Key).(Expr)
+		n.Value = c.node(n.Value).(Expr)
+
+	case *FuncLit:
+		n.Type = c.node(n.Type).(*FuncType)
+		n.Body = c.node(n.Body).(*BlockStmt)
+
+	case *ParenExpr:
+		n.X = c.node(n.X).(Expr)
+
+	case *SelectorExpr:
+		n.X = c.node(n.X).(Expr)
+		n.Sel = c.node(n.Sel).(*Name)
+
+	case *IndexExpr:
+		n.X = c.node(n.X).(Expr)
+		n.Index = c.node(n.Index).(Expr)
+
+	case *SliceExpr:
+		n.X = c.node(n.X).(Expr)
+		for i, x := range n.Index {
+			if x != nil {
+				n.Index[i] = c.node(x).(Expr)
+			}
+		}
+
+	case *AssertExpr:
+		n.X = c.node(n.X).(Expr)
+		n.Type = c.node(n.Type).(Expr)
+
+	case *TypeSwitchGuard:
+		if n.Lhs != nil {
+			n.Lhs = c.node(n.Lhs).(*Name)
+		}
+		n.X = c.node(n.X).(Expr)
+
+	case *Operation:
+		n.X = c.node(n.X).(Expr)
+		if n.Y != nil {
+			n.Y = c.node(n.Y).(Expr)
+		}
+
+	case *CallExpr:
+		n.Fun = c.node(n.Fun).(Expr)
+		n.ArgList = c.exprList(n.ArgList)
+
+	case *ListExpr:
+		n.ElemList = c.exprList(n.ElemList)
+
+	// types
+	case *ArrayType:
+		if n.Len != nil {
+			n.Len = c.node(n.Len).(Expr)
+		}
+		n.Elem = c.node(n.Elem).(Expr)
+
+	case *SliceType:
+		n.Elem = c.node(n.Elem).(Expr)
+
+	case *DotsType:
+		n.Elem = c.node(n.Elem).(Expr)
+
+	case *StructType:
+		n.FieldList = c.fieldList(n.FieldList)
+		for i, t := range n.TagList {
+			if t != nil {
+				n.TagList[i] = c.node(t).(*BasicLit)
+			}
+		}
+
+	case *Field:
+		if n.Name != nil {
+			n.Name = c.node(n.Name).(*Name)
+		}
+		n.Type = c.node(n.Type).(Expr)
+
+	case *InterfaceType:
+		n.MethodList = c.fieldList(n.MethodList)
+
+	case *FuncType:
+		n.ParamList = c.fieldList(n.ParamList)
+		n.ResultList = c.fieldList(n.ResultList)
+
+	case *MapType:
+		n.Key = c.node(n.Key).(Expr)
+		n.Value = c.node(n.Value).(Expr)
+
+	case *ChanType:
+		n.Elem = c.node(n.Elem).(Expr)
+
+	// statements
+	case *EmptyStmt: // nothing to do
+
+	case *LabeledStmt:
+		n.Label = c.node(n.Label).(*Name)
+		n.Stmt = c.node(n.Stmt).(Stmt)
+
+	case *BlockStmt:
+		n.List = c.stmtList(n.List)
+
+	case *ExprStmt:
+		n.X = c.node(n.X).(Expr)
+
+	case *SendStmt:
+		n.Chan = c.node(n.Chan).(Expr)
+		n.Value = c.node(n.Value).(Expr)
+
+	case *DeclStmt:
+		n.DeclList = c.declList(n.DeclList)
+
+	case *AssignStmt:
+		n.Lhs = c.node(n.Lhs).(Expr)
+		if n.Rhs != nil {
+			n.Rhs = c.node(n.Rhs).(Expr)
+		}
+
+	case *BranchStmt:
+		if n.Label != nil {
+			n.Label = c.node(n.Label).(*Name)
+		}
+		// Target points to nodes elsewhere in the syntax tree
+
+	case *CallStmt:
+		n.Call = c.node(n.Call).(Expr)
+
+	case *ReturnStmt:
+		if n.Results != nil {
+			n.Results = c.node(n.Results).(Expr)
+		}
+
+	case *IfStmt:
+		if n.Init != nil {
+			v := c.node(n.Init).(SimpleStmt)
+			n.Init = v
+		}
+		n.Cond = c.node(n.Cond).(Expr)
+		n.Then = c.node(n.Then).(*BlockStmt)
+		if n.Else != nil {
+			n.Else = c.node(n.Else).(Stmt)
+		}
+
+	case *ForStmt:
+		if n.Init != nil {
+			n.Init = c.node(n.Init).(SimpleStmt)
+		}
+		if n.Cond != nil {
+			n.Cond = c.node(n.Cond).(Expr)
+		}
+		if n.Post != nil {
+			n.Post = c.node(n.Post).(SimpleStmt)
+		}
+		n.Body = c.node(n.Body).(*BlockStmt)
+
+	case *SwitchStmt:
+		if n.Init != nil {
+			n.Init = c.node(n.Init).(SimpleStmt)
+		}
+		if n.Tag != nil {
+			n.Tag = c.node(n.Tag).(Expr)
+		}
+		for i, s := range n.Body {
+			n.Body[i] = c.node(s).(*CaseClause)
+		}
+
+	case *SelectStmt:
+		for i, s := range n.Body {
+			n.Body[i] = c.node(s).(*CommClause)
+		}
+
+	// helper nodes
+	case *RangeClause:
+		if n.Lhs != nil {
+			n.Lhs = c.node(n.Lhs).(Expr)
+		}
+		n.X = c.node(n.X).(Expr)
+
+	case *CaseClause:
+		if n.Cases != nil {
+			n.Cases = c.node(n.Cases).(Expr)
+		}
+		n.Body = c.stmtList(n.Body)
+
+	case *CommClause:
+		if n.Comm != nil {
+			n.Comm = c.node(n.Comm).(SimpleStmt)
+		}
+		n.Body = c.stmtList(n.Body)
+
+	default:
+		panic(fmt.Sprintf("internal error: unknown node type %T", n))
+	}
+
+	c.changer.Change(nil)
+	return o
+}
+
+func (c ASTChanger) declList(list []Decl) []Decl {
+	for i, n := range list {
+		list[i] = c.node(n).(Decl)
+	}
+	return list
+}
+
+func (c ASTChanger) exprList(list []Expr) []Expr {
+	for i, n := range list {
+		list[i] = c.node(n).(Expr)
+	}
+	return list
+}
+
+func (c ASTChanger) stmtList(list []Stmt) []Stmt {
+	for i, n := range list {
+		list[i] = c.node(n).(Stmt)
+	}
+	return list
+}
+
+func (c ASTChanger) nameList(list []*Name) []*Name {
+	for i, n := range list {
+		list[i] = c.node(n).(*Name)
+	}
+	return list
+}
+
+func (c ASTChanger) fieldList(list []*Field) []*Field {
+	for i, n := range list {
+		list[i] = c.node(n).(*Field)
+	}
+	return list
 }

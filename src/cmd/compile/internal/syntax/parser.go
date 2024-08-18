@@ -472,7 +472,61 @@ func (p *parser) fileOrNil() *File {
 	p.clearPragma()
 	f.EOF = p.pos()
 
+	p.apply(f)
 	return f
+}
+
+func (p *parser) apply(f *File) {
+	// immret
+	WalkAndChange(f, func(n *Node) bool {
+		if n == nil {
+			return true
+		}
+
+		exprstmt, ok := (*n).(*ExprStmt)
+		if !ok {
+			return true
+		}
+
+		call, ok := (exprstmt.X).(*CallExpr)
+		if ok {
+			if !call.ImmReturn {
+				return true
+			}
+
+			call.ImmReturn = false
+			pos := call.Pos()
+
+			ifstmt := new(IfStmt)
+			ifstmt.pos = call.Pos()
+
+			ifstmt.Init = p.newAssignStmt(pos, Def, NewName(pos, "err"), call)
+
+			ifstmt.Cond = &Operation{
+				Op:   Neq,
+				X:    NewName(pos, "err"),
+				Y:    NewName(pos, "nil"),
+				expr: expr{node: node{pos: pos}},
+			}
+
+			ifstmt.Then = &BlockStmt{
+				List: []Stmt{&ReturnStmt{
+					Results: NewName(pos, "err"),
+					stmt: stmt{
+						node{pos},
+					},
+				}},
+				Rbrace: pos,
+				stmt: stmt{
+					node{pos},
+				},
+			}
+
+			*n = ifstmt
+		}
+
+		return true
+	})
 }
 
 func isEmptyFuncDecl(dcl Decl) bool {
@@ -1187,6 +1241,7 @@ loop:
 			t := new(CallExpr)
 			t.pos = pos
 			p.next()
+			t.ImmReturn = p.immret
 			t.Fun = x
 			t.ArgList, t.HasDots = p.argList()
 			x = t

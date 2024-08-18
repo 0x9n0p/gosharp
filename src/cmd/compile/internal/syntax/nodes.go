@@ -235,11 +235,12 @@ type (
 		expr
 	}
 
-	// Fun(ArgList[0], ArgList[1], ...)
+	// Fun(ArgList[0], ArgList[1], ...)?
 	CallExpr struct {
-		Fun     Expr
-		ArgList []Expr // nil means no arguments
-		HasDots bool   // last argument is followed by ...
+		Fun       Expr
+		ArgList   []Expr // nil means no arguments
+		HasDots   bool   // last argument is followed by ...
+        ImmReturn bool // ImmReturn means expr returns immediately in error case
 		expr
 	}
 

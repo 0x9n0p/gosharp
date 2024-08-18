@@ -41,6 +41,7 @@ type scanner struct {
 	kind      LitKind  // valid if tok is _Literal
 	op        Operator // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
 	prec      int      // valid if tok is _Operator, _Star, _AssignOp, or _IncOp
+	immret    bool     // valid if tok is _Rparen, true if _QuestionMark used after _Rparen
 }
 
 func (s *scanner) init(src io.Reader, errh func(line, col uint, msg string), mode uint) {
@@ -107,6 +108,8 @@ redo:
 		return
 	}
 
+	s.immret = false
+
 	switch s.ch {
 	case -1:
 		if nlsemi {
@@ -158,6 +161,10 @@ redo:
 		s.nextch()
 		s.nlsemi = true
 		s.tok = _Rparen
+		if s.ch == '?' {
+			s.nextch()
+			s.immret = true
+		}
 
 	case ']':
 		s.nextch()

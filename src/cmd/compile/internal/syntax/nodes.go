@@ -240,7 +240,7 @@ type (
 		Fun       Expr
 		ArgList   []Expr // nil means no arguments
 		HasDots   bool   // last argument is followed by ...
-		ImmReturn bool   // callee()?
+        ImmReturn bool // ImmReturn means expr returns immediately in error case
 		expr
 	}
 

@@ -216,12 +216,13 @@ const (
 	O_WRONLY = 1
 	O_RDWR   = 2
 
-	O_CREAT  = 0100
-	O_CREATE = O_CREAT
-	O_TRUNC  = 01000
-	O_APPEND = 02000
-	O_EXCL   = 0200
-	O_SYNC   = 010000
+	O_CREAT     = 0100
+	O_CREATE    = O_CREAT
+	O_TRUNC     = 01000
+	O_APPEND    = 02000
+	O_EXCL      = 0200
+	O_SYNC      = 010000
+	O_DIRECTORY = 020000
 
 	O_CLOEXEC = 0
 )
@@ -307,7 +308,7 @@ func (w WaitStatus) TrapCause() int     { return 0 }
 
 // Rusage is a placeholder to allow compilation of the [os/exec] package
 // because we need Go programs to be portable across platforms. WASI does
-// not have a mechanism to to spawn processes so there is no reason for an
+// not have a mechanism to spawn processes so there is no reason for an
 // application to take a dependency on this type.
 type Rusage struct {
 	Utime Timeval
@@ -316,7 +317,7 @@ type Rusage struct {
 
 // ProcAttr is a placeholder to allow compilation of the [os/exec] package
 // because we need Go programs to be portable across platforms. WASI does
-// not have a mechanism to to spawn processes so there is no reason for an
+// not have a mechanism to spawn processes so there is no reason for an
 // application to take a dependency on this type.
 type ProcAttr struct {
 	Dir   string

@@ -411,9 +411,7 @@ func combinesWithName(x ast.Expr) bool {
 	case *ast.BinaryExpr:
 		return combinesWithName(x.X) && !isTypeElem(x.Y)
 	case *ast.ParenExpr:
-		// name(x) combines but we are making sure at
-		// the call site that x is never parenthesized.
-		panic("unexpected parenthesized expression")
+		return combinesWithName(x.X)
 	}
 	return false
 }
@@ -1739,6 +1737,9 @@ func (p *printer) genDecl(d *ast.GenDecl) {
 	p.setPos(d.Pos())
 	p.print(d.Tok, blank)
 
+	defer func(d bool) { p.inDecl = d }(p.inDecl)
+	p.inDecl = true
+
 	if d.Lparen.IsValid() || len(d.Specs) != 1 {
 		// group of parenthesized declarations
 		p.setPos(d.Lparen)
@@ -1923,6 +1924,10 @@ func (p *printer) funcDecl(d *ast.FuncDecl) {
 	p.setComment(d.Doc)
 	p.setPos(d.Pos())
 	p.print(token.FUNC, blank)
+
+	defer func(d bool) { p.inDecl = d }(p.inDecl)
+	p.inDecl = true
+
 	// We have to save startCol only after emitting FUNC; otherwise it can be on a
 	// different line (all whitespace preceding the FUNC is emitted only when the
 	// FUNC is emitted).

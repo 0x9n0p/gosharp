@@ -187,7 +187,7 @@ func IndexRune(s []byte, r rune) int {
 		return -1
 
 	fallback:
-		// Switch to bytealg.Index, if available, or a brute for search when
+		// Switch to bytealg.Index, if available, or a brute force search when
 		// IndexByte returns too many false positives.
 		if haveFastIndex {
 			if j := bytealg.Index(s[i-last:], b[:n]); j >= 0 {
@@ -592,7 +592,7 @@ func Join(s [][]byte, sep []byte) []byte {
 
 // HasPrefix reports whether the byte slice s begins with prefix.
 func HasPrefix(s, prefix []byte) bool {
-	return len(s) >= len(prefix) && Equal(s[0:len(prefix)], prefix)
+	return len(s) >= len(prefix) && Equal(s[:len(prefix)], prefix)
 }
 
 // HasSuffix reports whether the byte slice s ends with suffix.

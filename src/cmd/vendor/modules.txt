@@ -16,11 +16,12 @@ github.com/google/pprof/third_party/svgpan
 # github.com/ianlancetaylor/demangle v0.0.0-20240312041847-bd984b5ce465
 ## explicit; go 1.13
 github.com/ianlancetaylor/demangle
-# golang.org/x/arch v0.8.1-0.20240716161256-b863392466ea
+# golang.org/x/arch v0.9.1-0.20240807172201-9d90945922a7
 ## explicit; go 1.18
 golang.org/x/arch/arm/armasm
 golang.org/x/arch/arm64/arm64asm
 golang.org/x/arch/ppc64/ppc64asm
+golang.org/x/arch/s390x/s390xasm
 golang.org/x/arch/x86/x86asm
 # golang.org/x/build v0.0.0-20240722200705-b9910f320300
 ## explicit; go 1.21
@@ -45,7 +46,7 @@ golang.org/x/sync/semaphore
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/telemetry v0.0.0-20240807181058-38c23d25f755
+# golang.org/x/telemetry v0.0.0-20240828202201-a797f331ea97
 ## explicit; go 1.20
 golang.org/x/telemetry
 golang.org/x/telemetry/counter
@@ -70,8 +71,8 @@ golang.org/x/text/internal/tag
 golang.org/x/text/language
 golang.org/x/text/transform
 golang.org/x/text/unicode/norm
-# golang.org/x/tools v0.23.1-0.20240722161640-ec1a81bfec7c
-## explicit; go 1.19
+# golang.org/x/tools v0.24.1-0.20240904143311-70f56264139c
+## explicit; go 1.22.6
 golang.org/x/tools/cmd/bisect
 golang.org/x/tools/cover
 golang.org/x/tools/go/analysis

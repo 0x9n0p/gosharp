@@ -151,17 +151,13 @@ func listGroupsForUsernameAndDomain(username, domain string) ([]string, error) {
 	// NetUserGetLocalGroups() would return a list of LocalGroupUserInfo0
 	// elements which hold the names of local groups where the user participates.
 	// The list does not follow any sorting order.
-	//
-	// If no groups can be found for this user, NetUserGetLocalGroups() should
-	// always return the SID of a single group called "None", which
-	// also happens to be the primary group for the local user.
 	err = windows.NetUserGetLocalGroups(nil, q, 0, windows.LG_INCLUDE_INDIRECT, &p0, windows.MAX_PREFERRED_LENGTH, &entriesRead, &totalEntries)
 	if err != nil {
 		return nil, err
 	}
 	defer syscall.NetApiBufferFree(p0)
 	if entriesRead == 0 {
-		return nil, fmt.Errorf("listGroupsForUsernameAndDomain: NetUserGetLocalGroups() returned an empty list for domain: %s, username: %s", domain, username)
+		return nil, nil
 	}
 	entries := (*[1024]windows.LocalGroupUserInfo0)(unsafe.Pointer(p0))[:entriesRead:entriesRead]
 	var sids []string
@@ -232,12 +228,24 @@ func current() (*User, error) {
 		if e != nil {
 			return e
 		}
-		username, domain, e := lookupUsernameAndDomain(u.User.Sid)
+		username, e := windows.GetUserName(syscall.NameSamCompatible)
 		if e != nil {
 			return e
 		}
-		usr, e = newUser(uid, gid, dir, username, domain)
-		return e
+		displayName, e := windows.GetUserName(syscall.NameDisplay)
+		if e != nil {
+			// Historically, the username is used as fallback
+			// when the display name can't be retrieved.
+			displayName = username
+		}
+		usr = &User{
+			Uid:      uid,
+			Gid:      gid,
+			Username: username,
+			Name:     displayName,
+			HomeDir:  dir,
+		}
+		return nil
 	})
 	return usr, err
 }

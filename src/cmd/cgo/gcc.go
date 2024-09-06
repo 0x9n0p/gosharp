@@ -193,7 +193,6 @@ func (p *Package) Translate(f *File) {
 	var conv typeConv
 	conv.Init(p.PtrSize, p.IntSize)
 
-	p.loadDefines(f)
 	p.typedefs = map[string]bool{}
 	p.typedefList = nil
 	numTypedefs := -1
@@ -233,12 +232,14 @@ func (p *Package) Translate(f *File) {
 
 // loadDefines coerces gcc into spitting out the #defines in use
 // in the file f and saves relevant renamings in f.Name[name].Define.
-func (p *Package) loadDefines(f *File) {
+// Returns true if env:CC is Clang
+func (f *File) loadDefines(gccOptions []string) bool {
 	var b bytes.Buffer
 	b.WriteString(builtinProlog)
 	b.WriteString(f.Preamble)
-	stdout := p.gccDefines(b.Bytes())
+	stdout := gccDefines(b.Bytes(), gccOptions)
 
+	var gccIsClang bool
 	for _, line := range strings.Split(stdout, "\n") {
 		if len(line) < 9 || line[0:7] != "#define" {
 			continue
@@ -261,7 +262,7 @@ func (p *Package) loadDefines(f *File) {
 		}
 
 		if key == "__clang__" {
-			p.GccIsClang = true
+			gccIsClang = true
 		}
 
 		if n := f.Name[key]; n != nil {
@@ -271,6 +272,7 @@ func (p *Package) loadDefines(f *File) {
 			n.Define = val
 		}
 	}
+	return gccIsClang
 }
 
 // guessKinds tricks gcc into revealing the kind of each
@@ -1722,7 +1724,7 @@ func checkGCCBaseCmd() ([]string, error) {
 }
 
 // gccMachine returns the gcc -m flag to use, either "-m32", "-m64" or "-marm".
-func (p *Package) gccMachine() []string {
+func gccMachine() []string {
 	switch goarch {
 	case "amd64":
 		if goos == "darwin" {
@@ -1795,7 +1797,7 @@ func (p *Package) gccCmd() []string {
 	}
 
 	c = append(c, p.GccOptions...)
-	c = append(c, p.gccMachine()...)
+	c = append(c, gccMachine()...)
 	if goos == "aix" {
 		c = append(c, "-maix64")
 		c = append(c, "-mcmodel=large")
@@ -2187,10 +2189,10 @@ func (p *Package) gccDebug(stdin []byte, nnames int) (d *dwarf.Data, ints []int6
 // and returns the corresponding standard output, which is the
 // #defines that gcc encountered while processing the input
 // and its included files.
-func (p *Package) gccDefines(stdin []byte) string {
+func gccDefines(stdin []byte, gccOptions []string) string {
 	base := append(gccBaseCmd, "-E", "-dM", "-xc")
-	base = append(base, p.gccMachine()...)
-	stdout, _ := runGcc(stdin, append(append(base, p.GccOptions...), "-"))
+	base = append(base, gccMachine()...)
+	stdout, _ := runGcc(stdin, append(append(base, gccOptions...), "-"))
 	return stdout
 }
 
@@ -2577,6 +2579,11 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		if dt.BitSize > 0 {
 			fatalf("%s: unexpected: %d-bit int type - %s", lineno(pos), dt.BitSize, dtype)
 		}
+
+		if t.Align = t.Size; t.Align >= c.ptrSize {
+			t.Align = c.ptrSize
+		}
+
 		switch t.Size {
 		default:
 			fatalf("%s: unexpected: %d-byte int type - %s", lineno(pos), t.Size, dtype)
@@ -2593,9 +2600,8 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 				Len: c.intExpr(t.Size),
 				Elt: c.uint8,
 			}
-		}
-		if t.Align = t.Size; t.Align >= c.ptrSize {
-			t.Align = c.ptrSize
+			// t.Align is the alignment of the Go type.
+			t.Align = 1
 		}
 
 	case *dwarf.PtrType:
@@ -2824,6 +2830,11 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		if dt.BitSize > 0 {
 			fatalf("%s: unexpected: %d-bit uint type - %s", lineno(pos), dt.BitSize, dtype)
 		}
+
+		if t.Align = t.Size; t.Align >= c.ptrSize {
+			t.Align = c.ptrSize
+		}
+
 		switch t.Size {
 		default:
 			fatalf("%s: unexpected: %d-byte uint type - %s", lineno(pos), t.Size, dtype)
@@ -2840,9 +2851,8 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 				Len: c.intExpr(t.Size),
 				Elt: c.uint8,
 			}
-		}
-		if t.Align = t.Size; t.Align >= c.ptrSize {
-			t.Align = c.ptrSize
+			// t.Align is the alignment of the Go type.
+			t.Align = 1
 		}
 
 	case *dwarf.VoidType:
@@ -3108,10 +3118,11 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 		}
 
 		// Round off up to talign, assumed to be a power of 2.
+		origOff := off
 		off = (off + talign - 1) &^ (talign - 1)
 
 		if f.ByteOffset > off {
-			fld, sizes = c.pad(fld, sizes, f.ByteOffset-off)
+			fld, sizes = c.pad(fld, sizes, f.ByteOffset-origOff)
 			off = f.ByteOffset
 		}
 		if f.ByteOffset < off {

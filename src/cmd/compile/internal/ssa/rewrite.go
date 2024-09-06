@@ -1188,33 +1188,6 @@ func logRule(s string) {
 
 var ruleFile io.Writer
 
-// TODO: replace these with the built-in min/max once they are available
-// during bootstrap (when bootstrapping with 1.21 or later).
-func min(x, y int64) int64 {
-	if x < y {
-		return x
-	}
-	return y
-}
-func max(x, y int64) int64 {
-	if x > y {
-		return x
-	}
-	return y
-}
-func minU(x, y uint64) uint64 {
-	if x < y {
-		return x
-	}
-	return y
-}
-func maxU(x, y uint64) uint64 {
-	if x > y {
-		return x
-	}
-	return y
-}
-
 func isConstZero(v *Value) bool {
 	switch v.Op {
 	case OpConstNil:
@@ -1786,14 +1759,15 @@ func convertPPC64OpToOpCC(op *Value) *Value {
 		OpPPC64ADD:      OpPPC64ADDCC,
 		OpPPC64ADDconst: OpPPC64ADDCCconst,
 		OpPPC64AND:      OpPPC64ANDCC,
-		OpPPC64ANDconst: OpPPC64ANDCCconst,
 		OpPPC64ANDN:     OpPPC64ANDNCC,
+		OpPPC64ANDconst: OpPPC64ANDCCconst,
 		OpPPC64CNTLZD:   OpPPC64CNTLZDCC,
+		OpPPC64MULHDU:   OpPPC64MULHDUCC,
+		OpPPC64NEG:      OpPPC64NEGCC,
+		OpPPC64NOR:      OpPPC64NORCC,
 		OpPPC64OR:       OpPPC64ORCC,
 		OpPPC64RLDICL:   OpPPC64RLDICLCC,
 		OpPPC64SUB:      OpPPC64SUBCC,
-		OpPPC64NEG:      OpPPC64NEGCC,
-		OpPPC64NOR:      OpPPC64NORCC,
 		OpPPC64XOR:      OpPPC64XORCC,
 	}
 	b := op.Block

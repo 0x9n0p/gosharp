@@ -155,7 +155,7 @@ func (check *Checker) funcType(sig *Signature, recvPar *ast.FieldList, ftyp *ast
 }
 
 // collectRecv extracts the method receiver and its type parameters (if any) from rparam.
-// It declares the type parameters (but not the receiver) in the the current scope, and
+// It declares the type parameters (but not the receiver) in the current scope, and
 // returns the receiver variable and its type parameter list (if any).
 func (check *Checker) collectRecv(rparam *ast.Field, scopePos token.Pos) (recv *Var, recvTParamsList *TypeParamList) {
 	// Unpack the receiver parameter which is of the form
@@ -302,7 +302,7 @@ func (check *Checker) recordParenthesizedRecvTypes(expr ast.Expr, typ Type) {
 	}
 }
 
-// collectParams collects (but does not delare) all parameters of list and returns
+// collectParams collects (but does not declare) all parameters of list and returns
 // the list of parameter names, corresponding parameter variables, and whether the
 // parameter list is variadic. Anonymous parameters are recorded with nil names.
 func (check *Checker) collectParams(list *ast.FieldList, variadicOk bool) (names []*ast.Ident, params []*Var, variadic bool) {

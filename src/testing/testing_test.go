@@ -6,6 +6,8 @@ package testing_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"internal/race"
 	"internal/testenv"
@@ -291,10 +293,16 @@ func TestChdir(t *testing.T) {
 	}
 	defer os.Chdir(oldDir)
 
-	tmp := t.TempDir()
-	rel, err := filepath.Rel(oldDir, tmp)
+	// The "relative" test case relies on tmp not being a symlink.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(oldDir, tmp)
+	if err != nil {
+		// If GOROOT is on C: volume and tmp is on the D: volume, there
+		// is no relative path between them, so skip that test case.
+		rel = "skip"
 	}
 
 	for _, tc := range []struct {
@@ -325,6 +333,9 @@ func TestChdir(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.dir == "skip" {
+				t.Skipf("skipping test because there is no relative path between %s and %s", oldDir, tmp)
+			}
 			if !filepath.IsAbs(tc.pwd) {
 				t.Fatalf("Bad tc.pwd: %q (must be absolute)", tc.pwd)
 			}
@@ -429,12 +440,7 @@ func runTest(t *testing.T, test string) []byte {
 
 	testenv.MustHaveExec(t)
 
-	exe, err := os.Executable()
-	if err != nil {
-		t.Skipf("can't find test executable: %v", err)
-	}
-
-	cmd := testenv.Command(t, exe, "-test.run=^"+test+"$", "-test.bench="+test, "-test.v", "-test.parallel=2", "-test.benchtime=2x")
+	cmd := testenv.Command(t, testenv.Executable(t), "-test.run=^"+test+"$", "-test.bench="+test, "-test.v", "-test.parallel=2", "-test.benchtime=2x")
 	cmd = testenv.CleanCmdEnv(cmd)
 	cmd.Env = append(cmd.Env, "GO_WANT_HELPER_PROCESS=1")
 	out, err := cmd.CombinedOutput()
@@ -663,14 +669,7 @@ func TestRaceBeforeParallel(t *testing.T) {
 }
 
 func TestRaceBeforeTests(t *testing.T) {
-	testenv.MustHaveExec(t)
-
-	exe, err := os.Executable()
-	if err != nil {
-		t.Skipf("can't find test executable: %v", err)
-	}
-
-	cmd := testenv.Command(t, exe, "-test.run=^$")
+	cmd := testenv.Command(t, testenv.Executable(t), "-test.run=^$")
 	cmd = testenv.CleanCmdEnv(cmd)
 	cmd.Env = append(cmd.Env, "GO_WANT_RACE_BEFORE_TESTS=1")
 	out, _ := cmd.CombinedOutput()
@@ -916,5 +915,31 @@ func TestParentRun(t1 *testing.T) {
 		t1.Run("not_inner", func(t3 *testing.T) { // Note: this is t1.Run, not t2.Run.
 			t3.Log("Hello inner!")
 		})
+	})
+}
+
+func TestContext(t *testing.T) {
+	ctx := t.Context()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("expected non-canceled context, got %v", err)
+	}
+
+	var innerCtx context.Context
+	t.Run("inner", func(t *testing.T) {
+		innerCtx = t.Context()
+		if err := innerCtx.Err(); err != nil {
+			t.Fatalf("expected inner test to not inherit canceled context, got %v", err)
+		}
+	})
+	t.Run("inner2", func(t *testing.T) {
+		if !errors.Is(innerCtx.Err(), context.Canceled) {
+			t.Fatal("expected context of sibling test to be canceled after its test function finished")
+		}
+	})
+
+	t.Cleanup(func() {
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatal("expected context canceled before cleanup")
+		}
 	})
 }

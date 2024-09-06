@@ -9,7 +9,10 @@ import (
 	"internal/abi"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 // Set up special types. Because the internal maps are sharded by type,
@@ -30,17 +33,18 @@ type testStruct struct {
 }
 
 func TestHandle(t *testing.T) {
-	testHandle[testString](t, "foo")
-	testHandle[testString](t, "bar")
-	testHandle[testString](t, "")
-	testHandle[testIntArray](t, [4]int{7, 77, 777, 7777})
-	testHandle[testEface](t, nil)
-	testHandle[testStringArray](t, [3]string{"a", "b", "c"})
-	testHandle[testStringStruct](t, testStringStruct{"x"})
-	testHandle[testStringStructArrayStruct](t, testStringStructArrayStruct{
-		s: [2]testStringStruct{testStringStruct{"y"}, testStringStruct{"z"}},
+	testHandle(t, testString("foo"))
+	testHandle(t, testString("bar"))
+	testHandle(t, testString(""))
+	testHandle(t, testIntArray{7, 77, 777, 7777})
+	testHandle(t, testEface(nil))
+	testHandle(t, testStringArray{"a", "b", "c"})
+	testHandle(t, testStringStruct{"x"})
+	testHandle(t, testStringStructArrayStruct{
+		s: [2]testStringStruct{{"y"}, {"z"}},
 	})
-	testHandle[testStruct](t, testStruct{0.5, "184"})
+	testHandle(t, testStruct{0.5, "184"})
+	testHandle(t, testEface("hello"))
 }
 
 func testHandle[T comparable](t *testing.T, value T) {
@@ -93,7 +97,7 @@ func drainMaps(t *testing.T) {
 
 func checkMapsFor[T comparable](t *testing.T, value T) {
 	// Manually load the value out of the map.
-	typ := abi.TypeOf(value)
+	typ := abi.TypeFor[T]()
 	a, ok := uniqueMaps.Load(typ)
 	if !ok {
 		return
@@ -108,4 +112,23 @@ func checkMapsFor[T comparable](t *testing.T, value T) {
 		return
 	}
 	t.Errorf("failed to drain internal maps of %v", value)
+}
+
+func TestMakeClonesStrings(t *testing.T) {
+	s := strings.Clone("abcdefghijklmnopqrstuvwxyz") // N.B. Must be big enough to not be tiny-allocated.
+	ran := make(chan bool)
+	runtime.SetFinalizer(unsafe.StringData(s), func(_ *byte) {
+		ran <- true
+	})
+	h := Make(s)
+
+	// Clean up s (hopefully) and run the finalizer.
+	runtime.GC()
+
+	select {
+	case <-time.After(1 * time.Second):
+		t.Fatal("string was improperly retained")
+	case <-ran:
+	}
+	runtime.KeepAlive(h)
 }

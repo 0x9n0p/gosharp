@@ -4426,7 +4426,13 @@ func reentersyscall(pc, sp, bp uintptr) {
 	}
 	if gp.syscallsp < gp.stack.lo || gp.stack.hi < gp.syscallsp {
 		systemstack(func() {
-			print("entersyscall inconsistent ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscall inconsistent sp ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			throw("entersyscall")
+		})
+	}
+	if gp.syscallbp != 0 && gp.syscallbp < gp.stack.lo || gp.stack.hi < gp.syscallbp {
+		systemstack(func() {
+			print("entersyscall inconsistent bp ", hex(gp.syscallbp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscall")
 		})
 	}
@@ -4564,14 +4570,20 @@ func entersyscallblock() {
 		sp2 := gp.sched.sp
 		sp3 := gp.syscallsp
 		systemstack(func() {
-			print("entersyscallblock inconsistent ", hex(sp1), " ", hex(sp2), " ", hex(sp3), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscallblock inconsistent sp ", hex(sp1), " ", hex(sp2), " ", hex(sp3), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscallblock")
 		})
 	}
 	casgstatus(gp, _Grunning, _Gsyscall)
 	if gp.syscallsp < gp.stack.lo || gp.stack.hi < gp.syscallsp {
 		systemstack(func() {
-			print("entersyscallblock inconsistent ", hex(sp), " ", hex(gp.sched.sp), " ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			print("entersyscallblock inconsistent sp ", hex(sp), " ", hex(gp.sched.sp), " ", hex(gp.syscallsp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
+			throw("entersyscallblock")
+		})
+	}
+	if gp.syscallbp != 0 && gp.syscallbp < gp.stack.lo || gp.stack.hi < gp.syscallbp {
+		systemstack(func() {
+			print("entersyscallblock inconsistent bp ", hex(bp), " ", hex(gp.sched.bp), " ", hex(gp.syscallbp), " [", hex(gp.stack.lo), ",", hex(gp.stack.hi), "]\n")
 			throw("entersyscallblock")
 		})
 	}
@@ -4833,7 +4845,6 @@ func exitsyscall0(gp *g) {
 // syscall_runtime_BeforeFork is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.
@@ -4863,7 +4874,6 @@ func syscall_runtime_BeforeFork() {
 // syscall_runtime_AfterFork is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.
@@ -4897,7 +4907,6 @@ var inForkedChild bool
 // syscall_runtime_AfterForkInChild is for package syscall,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
-//   - github.com/containerd/containerd
 //   - gvisor.dev/gvisor
 //
 // Do not remove or change the type signature.

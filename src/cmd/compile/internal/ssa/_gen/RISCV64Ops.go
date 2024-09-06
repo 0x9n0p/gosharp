@@ -220,6 +220,11 @@ func init() {
 		{name: "SRLI", argLength: 1, reg: gp11, asm: "SRLI", aux: "Int64"},   // arg0 >> auxint, shift amount 0-63, logical right shift
 		{name: "SRLIW", argLength: 1, reg: gp11, asm: "SRLIW", aux: "Int64"}, // arg0 >> auxint, shift amount 0-31, logical right shift of 32 bit value, sign extended to 64 bits
 
+		// Shift and add
+		{name: "SH1ADD", argLength: 2, reg: gp21, asm: "SH1ADD"}, // arg0 << 1 + arg1
+		{name: "SH2ADD", argLength: 2, reg: gp21, asm: "SH2ADD"}, // arg0 << 2 + arg1
+		{name: "SH3ADD", argLength: 2, reg: gp21, asm: "SH3ADD"}, // arg0 << 3 + arg1
+
 		// Bitwise ops
 		{name: "AND", argLength: 2, reg: gp21, asm: "AND", commutative: true}, // arg0 & arg1
 		{name: "ANDI", argLength: 1, reg: gp11, asm: "ANDI", aux: "Int64"},    // arg0 & auxint
@@ -234,6 +239,12 @@ func init() {
 		{name: "RORW", argLength: 2, reg: gp21, asm: "RORW"},                  // rotate right least significant word of arg0 by (arg1 & 31), sign extended
 		{name: "XOR", argLength: 2, reg: gp21, asm: "XOR", commutative: true}, // arg0 ^ arg1
 		{name: "XORI", argLength: 1, reg: gp11, asm: "XORI", aux: "Int64"},    // arg0 ^ auxint
+
+		// Minimum and maximum
+		{name: "MIN", argLength: 2, reg: gp21, asm: "MIN", commutative: true},   // min(arg0,arg1), signed
+		{name: "MAX", argLength: 2, reg: gp21, asm: "MAX", commutative: true},   // max(arg0,arg1), signed
+		{name: "MINU", argLength: 2, reg: gp21, asm: "MINU", commutative: true}, // min(arg0,arg1), unsigned
+		{name: "MAXU", argLength: 2, reg: gp21, asm: "MAXU", commutative: true}, // max(arg0,arg1), unsigned
 
 		// Generate boolean values
 		{name: "SEQZ", argLength: 1, reg: gp11, asm: "SEQZ"},                 // arg0 == 0, result is 0 or 1

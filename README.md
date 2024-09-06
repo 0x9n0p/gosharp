@@ -17,7 +17,7 @@ func caller() error {
 ```
 
 
-### Install From Source
+## Install From Source
 
 Make sure you have Golang installed.
 
@@ -46,6 +46,6 @@ gosharp version 1.0-nightly
 go version devel go1.23-0ba426291c Thu Jun 6 14:02:00 2024 +0330 linux/amd64
 ```
 
-### Contributing
+## Contributing
 
 Feel free to send Pull Requests, fix typos, grammatical mistakes. We appreciate your help!

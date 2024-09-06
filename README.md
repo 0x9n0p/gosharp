@@ -1,8 +1,21 @@
 # The GoSharp Programming Language
 
-GoSharp is an open-source programming language forked from [Golang](https://github.com/golang/go). This language will
-have features that make code hard
-to read and may explode the production server.
+GoSharp is an open-source programming language forked from [Golang](https://github.com/golang/go).
+
+## Features
+
+### Immediate Return https://github.com/0x9n0p/gosharp/pull/1
+Imagine we have a function named 'Callee' that returns an error. If we want to handle the error, we need to use an if statement to check the error and return it if that isn't nil. 
+It's simple and is one of the reasons that we love Golang! But, at least 3 lines of code will be added to our caller function's body. <br>
+With this feature, instead of using if statements, we can use a question mark after the right parenthesis!
+```go
+func caller() error {
+  callee()?
+  callee2()?
+  return nil
+}
+```
+
 
 ### Install From Source
 

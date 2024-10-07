@@ -459,7 +459,6 @@ type PackageError struct {
 	Pos              string   // position of error
 	Err              error    // the error itself
 	IsImportCycle    bool     // the error is an import cycle
-	Hard             bool     // whether the error is soft or hard; soft errors are ignored in some places
 	alwaysPrintStack bool     // whether to always print the ImportStack
 }
 
@@ -2495,7 +2494,7 @@ func (p *Package) setBuildInfo(ctx context.Context, autoVCS bool) {
 		}
 		appendSetting("vcs.modified", strconv.FormatBool(st.Uncommitted))
 		// Determine the correct version of this module at the current revision and update the build metadata accordingly.
-		repo := modfetch.LookupLocal(ctx, p.Module.Dir)
+		repo := modfetch.LookupLocal(ctx, repoDir)
 		revInfo, err := repo.Stat(ctx, st.Revision)
 		if err != nil {
 			goto omitVCS

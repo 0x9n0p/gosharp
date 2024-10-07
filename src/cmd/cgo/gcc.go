@@ -24,6 +24,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -58,17 +59,17 @@ func cname(s string) string {
 		return t
 	}
 
-	if strings.HasPrefix(s, "struct_") {
-		return "struct " + s[len("struct_"):]
+	if t, ok := strings.CutPrefix(s, "struct_"); ok {
+		return "struct " + t
 	}
-	if strings.HasPrefix(s, "union_") {
-		return "union " + s[len("union_"):]
+	if t, ok := strings.CutPrefix(s, "union_"); ok {
+		return "union " + t
 	}
-	if strings.HasPrefix(s, "enum_") {
-		return "enum " + s[len("enum_"):]
+	if t, ok := strings.CutPrefix(s, "enum_"); ok {
+		return "enum " + t
 	}
-	if strings.HasPrefix(s, "sizeof_") {
-		return "sizeof(" + cname(s[len("sizeof_"):]) + ")"
+	if t, ok := strings.CutPrefix(s, "sizeof_"); ok {
+		return "sizeof(" + cname(t) + ")"
 	}
 	return s
 }
@@ -781,16 +782,13 @@ func (p *Package) mangleName(n *Name) {
 }
 
 func (f *File) isMangledName(s string) bool {
-	prefix := "_C"
-	if strings.HasPrefix(s, prefix) {
-		t := s[len(prefix):]
-		for _, k := range nameKinds {
-			if strings.HasPrefix(t, k+"_") {
-				return true
-			}
-		}
+	t, ok := strings.CutPrefix(s, "_C")
+	if !ok {
+		return false
 	}
-	return false
+	return slices.ContainsFunc(nameKinds, func(k string) bool {
+		return strings.HasPrefix(t, k+"_")
+	})
 }
 
 // rewriteCalls rewrites all calls that pass pointers to check that
@@ -1050,12 +1048,9 @@ func (p *Package) hasPointer(f *File, t ast.Expr, top bool) bool {
 		}
 		return p.hasPointer(f, t.Elt, top)
 	case *ast.StructType:
-		for _, field := range t.Fields.List {
-			if p.hasPointer(f, field.Type, top) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(t.Fields.List, func(field *ast.Field) bool {
+			return p.hasPointer(f, field.Type, top)
+		})
 	case *ast.StarExpr: // Pointer type.
 		if !top {
 			return true
@@ -1838,8 +1833,8 @@ func (p *Package) gccDebug(stdin []byte, nnames int) (d *dwarf.Data, ints []int6
 		if strings.HasPrefix(s, "___") {
 			s = s[1:]
 		}
-		if strings.HasPrefix(s, "__cgodebug_strlen__") {
-			if n, err := strconv.Atoi(s[len("__cgodebug_strlen__"):]); err == nil {
+		if t, ok := strings.CutPrefix(s, "__cgodebug_strlen__"); ok {
+			if n, err := strconv.Atoi(t); err == nil {
 				return n
 			}
 		}
@@ -3202,12 +3197,9 @@ func (c *typeConv) dwarfHasPointer(dt dwarf.Type, pos token.Pos) bool {
 		return c.dwarfHasPointer(dt.Type, pos)
 
 	case *dwarf.StructType:
-		for _, f := range dt.Field {
-			if c.dwarfHasPointer(f.Type, pos) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(dt.Field, func(f *dwarf.StructField) bool {
+			return c.dwarfHasPointer(f.Type, pos)
+		})
 
 	case *dwarf.TypedefType:
 		if dt.Name == "_GoString_" || dt.Name == "_GoBytes_" {

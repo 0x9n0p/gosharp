@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -473,7 +474,7 @@ func (tg *testgoData) unsetenv(name string) {
 	}
 	for i, v := range tg.env {
 		if strings.HasPrefix(v, name+"=") {
-			tg.env = append(tg.env[:i], tg.env[i+1:]...)
+			tg.env = slices.Delete(tg.env, i, i+1)
 			break
 		}
 	}
@@ -1504,13 +1505,16 @@ func main() {
 	tg.setenv("PKG_CONFIG_PATH", tg.path("."))
 	tg.run("run", tg.path("foo.go"))
 
-	// test for ldflags
-	tg.tempFile("bar.pc", `
+	if runtime.GOOS != "darwin" { // darwin doesn't like these ldflags
+		// test for ldflags
+		tg.tempFile("bar.pc", `
 Name: bar
 Description: The bar library
 Version: 1.0.0
 Libs: -Wl,-rpath=/path\ with\ spaces/bin
 `)
+	}
+
 	tg.tempFile("bar.go", `package main
 /*
 #cgo pkg-config: bar

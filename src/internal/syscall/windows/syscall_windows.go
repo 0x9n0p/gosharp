@@ -502,3 +502,31 @@ func QueryPerformanceCounter() int64 // Implemented in runtime package.
 func QueryPerformanceFrequency() int64 // Implemented in runtime package.
 
 //sys   GetModuleHandle(modulename *uint16) (handle syscall.Handle, err error) = kernel32.GetModuleHandleW
+
+// NTStatus corresponds with NTSTATUS, error values returned by ntdll.dll and
+// other native functions.
+type NTStatus uint32
+
+func (s NTStatus) Errno() syscall.Errno {
+	return rtlNtStatusToDosErrorNoTeb(s)
+}
+
+func langID(pri, sub uint16) uint32 { return uint32(sub)<<10 | uint32(pri) }
+
+func (s NTStatus) Error() string {
+	return s.Errno().Error()
+}
+
+// x/sys/windows/mkerrors.bash can generate a complete list of NTStatus codes.
+//
+// At the moment, we only need a couple, so just put them here manually.
+// If this list starts getting long, we should consider generating the full set.
+const (
+	STATUS_FILE_IS_A_DIRECTORY       NTStatus = 0xC00000BA
+	STATUS_NOT_A_DIRECTORY           NTStatus = 0xC0000103
+	STATUS_REPARSE_POINT_ENCOUNTERED NTStatus = 0xC000050B
+)
+
+// NT Native APIs
+//sys   NtCreateFile(handle *syscall.Handle, access uint32, oa *OBJECT_ATTRIBUTES, iosb *IO_STATUS_BLOCK, allocationSize *int64, attributes uint32, share uint32, disposition uint32, options uint32, eabuffer uintptr, ealength uint32) (ntstatus error) = ntdll.NtCreateFile
+//sys   rtlNtStatusToDosErrorNoTeb(ntstatus NTStatus) (ret syscall.Errno) = ntdll.RtlNtStatusToDosErrorNoTeb

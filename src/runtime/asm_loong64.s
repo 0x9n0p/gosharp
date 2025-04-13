@@ -113,10 +113,8 @@ TEXT gogo<>(SB), NOSPLIT|NOFRAME, $0
 
 	MOVV	gobuf_sp(R4), R3
 	MOVV	gobuf_lr(R4), R1
-	MOVV	gobuf_ret(R4), R19
 	MOVV	gobuf_ctxt(R4), REGCTXT
 	MOVV	R0, gobuf_sp(R4)
-	MOVV	R0, gobuf_ret(R4)
 	MOVV	R0, gobuf_lr(R4)
 	MOVV	R0, gobuf_ctxt(R4)
 	MOVV	gobuf_pc(R4), R6
@@ -347,32 +345,65 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-48;		\
 	NO_LOCAL_POINTERS;			\
 	/* copy arguments to stack */		\
 	MOVV	arg+16(FP), R4;			\
-	MOVWU	argsize+24(FP), R5;			\
-	MOVV	R3, R12;				\
+	MOVWU	argsize+24(FP), R5;		\
+	MOVV	R3, R12;			\
+	MOVV	$16, R13;			\
 	ADDV	$8, R12;			\
-	ADDV	R12, R5;				\
-	BEQ	R12, R5, 6(PC);				\
-	MOVBU	(R4), R6;			\
-	ADDV	$1, R4;			\
-	MOVBU	R6, (R12);			\
-	ADDV	$1, R12;			\
-	JMP	-5(PC);				\
+	BLT	R5, R13, check8;		\
+	/* copy 16 bytes a time */		\
+	MOVBU	internal∕cpu·Loong64+const_offsetLOONG64HasLSX(SB), R16;	\
+	BEQ	R16, copy16_again;		\
+loop16:;					\
+	VMOVQ	(R4), V0;			\
+	ADDV	$16, R4;			\
+	ADDV	$-16, R5;			\
+	VMOVQ	V0, (R12);			\
+	ADDV	$16, R12;			\
+	BGE	R5, R13, loop16;		\
+	JMP	check8;				\
+copy16_again:;					\
+	MOVV	(R4), R14;			\
+	MOVV	8(R4), R15;			\
+	ADDV	$16, R4;			\
+	ADDV	$-16, R5;			\
+	MOVV	R14, (R12);			\
+	MOVV	R15, 8(R12);			\
+	ADDV	$16, R12;			\
+	BGE	R5, R13, copy16_again;		\
+check8:;					\
+	/* R13 = 8 */;				\
+	SRLV	$1, R13;			\
+	BLT	R5, R13, 6(PC);			\
+	/* copy 8 bytes a time */		\
+	MOVV	(R4), R14;			\
+	ADDV	$8, R4;				\
+	ADDV	$-8, R5;			\
+	MOVV	R14, (R12);			\
+	ADDV	$8, R12;			\
+	BEQ     R5, R0, 7(PC);  		\
+	/* copy 1 byte a time for the rest */	\
+	MOVBU   (R4), R14;      		\
+	ADDV    $1, R4;         		\
+	ADDV    $-1, R5;        		\
+	MOVBU   R14, (R12);     		\
+	ADDV    $1, R12;        		\
+	JMP     -6(PC);         		\
 	/* set up argument registers */		\
 	MOVV	regArgs+40(FP), R25;		\
 	JAL	·unspillArgs(SB);		\
 	/* call function */			\
-	MOVV	f+8(FP), REGCTXT;			\
+	MOVV	f+8(FP), REGCTXT;		\
 	MOVV	(REGCTXT), R25;			\
 	PCDATA  $PCDATA_StackMapIndex, $0;	\
 	JAL	(R25);				\
 	/* copy return values back */		\
 	MOVV	regArgs+40(FP), R25;		\
-	JAL	·spillArgs(SB);		\
+	JAL	·spillArgs(SB);			\
 	MOVV	argtype+0(FP), R7;		\
 	MOVV	arg+16(FP), R4;			\
 	MOVWU	n+24(FP), R5;			\
 	MOVWU	retoffset+28(FP), R6;		\
-	ADDV	$8, R3, R12;				\
+	ADDV	$8, R3, R12;			\
 	ADDV	R6, R12; 			\
 	ADDV	R6, R4;				\
 	SUBVU	R6, R5;				\
@@ -435,7 +466,6 @@ TEXT gosave_systemstack_switch<>(SB),NOSPLIT|NOFRAME,$0
 	MOVV	R19, (g_sched+gobuf_pc)(g)
 	MOVV	R3, (g_sched+gobuf_sp)(g)
 	MOVV	R0, (g_sched+gobuf_lr)(g)
-	MOVV	R0, (g_sched+gobuf_ret)(g)
 	// Assert ctxt is zero. See func save.
 	MOVV	(g_sched+gobuf_ctxt)(g), R19
 	BEQ	R19, 2(PC)
@@ -626,9 +656,9 @@ TEXT runtime·setg(SB), NOSPLIT, $0-8
 	JAL	runtime·save_g(SB)
 	RET
 
-// void setg_gcc(G*); set g called from gcc with g in R19
+// void setg_gcc(G*); set g called from gcc with g in R4
 TEXT setg_gcc<>(SB),NOSPLIT,$0-0
-	MOVV	R19, g
+	MOVV	R4, g
 	JAL	runtime·save_g(SB)
 	RET
 
@@ -645,10 +675,6 @@ TEXT runtime·memhash32<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-24
 	JMP	runtime·memhash32Fallback<ABIInternal>(SB)
 TEXT runtime·memhash64<ABIInternal>(SB),NOSPLIT|NOFRAME,$0-24
 	JMP	runtime·memhash64Fallback<ABIInternal>(SB)
-
-TEXT runtime·return0(SB), NOSPLIT, $0
-	MOVW	$0, R19
-	RET
 
 // Called from cgo wrappers, this function returns g->m->curg.stack.hi.
 // Must obey the gcc calling convention.

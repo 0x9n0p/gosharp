@@ -134,6 +134,7 @@ var (
 	procGetVersion                         = modkernel32.NewProc("GetVersion")
 	procInitializeProcThreadAttributeList  = modkernel32.NewProc("InitializeProcThreadAttributeList")
 	procLoadLibraryW                       = modkernel32.NewProc("LoadLibraryW")
+	procLocalAlloc                         = modkernel32.NewProc("LocalAlloc")
 	procLocalFree                          = modkernel32.NewProc("LocalFree")
 	procMapViewOfFile                      = modkernel32.NewProc("MapViewOfFile")
 	procMoveFileW                          = modkernel32.NewProc("MoveFileW")
@@ -502,10 +503,10 @@ func CreateFileMapping(fhandle Handle, sa *SecurityAttributes, prot uint32, maxS
 	return
 }
 
-func CreateFile(name *uint16, access uint32, mode uint32, sa *SecurityAttributes, createmode uint32, attrs uint32, templatefile int32) (handle Handle, err error) {
+func createFile(name *uint16, access uint32, mode uint32, sa *SecurityAttributes, createmode uint32, attrs uint32, templatefile int32) (handle Handle, err error) {
 	r0, _, e1 := Syscall9(procCreateFileW.Addr(), 7, uintptr(unsafe.Pointer(name)), uintptr(access), uintptr(mode), uintptr(unsafe.Pointer(sa)), uintptr(createmode), uintptr(attrs), uintptr(templatefile), 0, 0)
 	handle = Handle(r0)
-	if handle == InvalidHandle {
+	if handle == InvalidHandle || e1 == ERROR_ALREADY_EXISTS {
 		err = errnoErr(e1)
 	}
 	return
@@ -924,6 +925,15 @@ func _LoadLibrary(libname *uint16) (handle Handle, err error) {
 	r0, _, e1 := Syscall(procLoadLibraryW.Addr(), 1, uintptr(unsafe.Pointer(libname)), 0, 0)
 	handle = Handle(r0)
 	if handle == 0 {
+		err = errnoErr(e1)
+	}
+	return
+}
+
+func localAlloc(flags uint32, length uint32) (ptr uintptr, err error) {
+	r0, _, e1 := Syscall(procLocalAlloc.Addr(), 2, uintptr(flags), uintptr(length), 0)
+	ptr = uintptr(r0)
+	if ptr == 0 {
 		err = errnoErr(e1)
 	}
 	return

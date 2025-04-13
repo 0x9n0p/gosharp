@@ -15,29 +15,39 @@ import (
 	"testing"
 )
 
-func TestOpen_Dir(t *testing.T) {
+func TestOpen(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	file := filepath.Join(dir, "a")
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
 	tests := []struct {
+		path string
 		flag int
 		err  error
 	}{
-		{syscall.O_RDONLY, nil},
-		{syscall.O_CREAT, nil},
-		{syscall.O_RDONLY | syscall.O_CREAT, nil},
-		{syscall.O_RDONLY | syscall.O_TRUNC, syscall.ERROR_ACCESS_DENIED},
-		{syscall.O_WRONLY | syscall.O_RDWR, syscall.EISDIR},
-		{syscall.O_WRONLY, syscall.EISDIR},
-		{syscall.O_RDWR, syscall.EISDIR},
+		{dir, syscall.O_RDONLY, nil},
+		{dir, syscall.O_CREAT, nil},
+		{dir, syscall.O_RDONLY | syscall.O_CREAT, nil},
+		{file, syscall.O_APPEND | syscall.O_WRONLY | os.O_CREATE, nil},
+		{file, syscall.O_APPEND | syscall.O_WRONLY | os.O_CREATE | os.O_TRUNC, nil},
+		{dir, syscall.O_RDONLY | syscall.O_TRUNC, syscall.ERROR_ACCESS_DENIED},
+		{dir, syscall.O_WRONLY | syscall.O_RDWR, syscall.EISDIR},
+		{dir, syscall.O_WRONLY, syscall.EISDIR},
+		{dir, syscall.O_RDWR, syscall.EISDIR},
 	}
 	for i, tt := range tests {
-		h, err := syscall.Open(dir, tt.flag, 0)
+		h, err := syscall.Open(tt.path, tt.flag, 0o660)
 		if err == nil {
 			syscall.CloseHandle(h)
 		}
 		if err != tt.err {
-			t.Errorf("%d: Open got %v, want %v", i, err, tt.err)
+			t.Errorf("%d: Open got %q, want %q", i, err, tt.err)
 		}
 	}
 }
@@ -215,6 +225,51 @@ func TestGetStartupInfo(t *testing.T) {
 		// see https://go.dev/issue/31316
 		t.Fatalf("GetStartupInfo: got error %v, want nil", err)
 	}
+}
+
+func TestSyscallAllocations(t *testing.T) {
+	testenv.SkipIfOptimizationOff(t)
+
+	// Test that syscall.SyscallN arguments do not escape.
+	// The function used (in this case GetVersion) doesn't matter
+	// as long as it is always available and doesn't panic.
+	h, err := syscall.LoadLibrary("kernel32.dll")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.FreeLibrary(h)
+	proc, err := syscall.GetProcAddress(h, "GetVersion")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testAllocs := func(t *testing.T, name string, fn func() error) {
+		t.Run(name, func(t *testing.T) {
+			n := int(testing.AllocsPerRun(10, func() {
+				if err := fn(); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+			}))
+			if n > 0 {
+				t.Errorf("allocs = %d, want 0", n)
+			}
+		})
+	}
+
+	testAllocs(t, "SyscallN", func() error {
+		r0, _, e1 := syscall.SyscallN(proc, 0, 0, 0)
+		if r0 == 0 {
+			return syscall.Errno(e1)
+		}
+		return nil
+	})
+	testAllocs(t, "Syscall", func() error {
+		r0, _, e1 := syscall.Syscall(proc, 3, 0, 0, 0)
+		if r0 == 0 {
+			return syscall.Errno(e1)
+		}
+		return nil
+	})
 }
 
 func FuzzUTF16FromString(f *testing.F) {

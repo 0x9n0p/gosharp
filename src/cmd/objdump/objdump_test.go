@@ -105,8 +105,6 @@ func mustHaveDisasm(t *testing.T) {
 	switch runtime.GOARCH {
 	case "mips", "mipsle", "mips64", "mips64le":
 		t.Skipf("skipping on %s, issue 12559", runtime.GOARCH)
-	case "riscv64":
-		t.Skipf("skipping on %s, issue 36738", runtime.GOARCH)
 	}
 }
 
@@ -136,9 +134,9 @@ func testDisasm(t *testing.T, srcfname string, printCode bool, printGnuAsm bool,
 		goarch = f[1]
 	}
 
-	hash := hash.Sum16([]byte(fmt.Sprintf("%v-%v-%v-%v", srcfname, flags, printCode, printGnuAsm)))
+	hash := hash.Sum32([]byte(fmt.Sprintf("%v-%v-%v-%v", srcfname, flags, printCode, printGnuAsm)))
 	tmp := t.TempDir()
-	hello := filepath.Join(tmp, fmt.Sprintf("hello-%x.exe", hash))
+	hello := filepath.Join(tmp, fmt.Sprintf("hello-%x.exe", hash[:16]))
 	args := []string{"build", "-o", hello}
 	args = append(args, flags...)
 	args = append(args, srcfname)

@@ -49,7 +49,8 @@ type Frame struct {
 	// File and Line are the file name and line number of the
 	// location in this frame. For non-leaf frames, this will be
 	// the location of a call. These may be the empty string and
-	// zero, respectively, if not known.
+	// zero, respectively, if not known. The file name uses
+	// forward slashes, even on Windows.
 	File string
 	Line int
 
@@ -117,11 +118,16 @@ func (ci *Frames) Next() (frame Frame, more bool) {
 		}
 		f := funcInfo._Func()
 		entry := f.Entry()
+		// We store the pc of the start of the instruction following
+		// the instruction in question (the call or the inline mark).
+		// This is done for historical reasons, and to make FuncForPC
+		// work correctly for entries in the result of runtime.Callers.
+		// Decrement to get back to the instruction we care about.
+		//
+		// It is not possible to get pc == entry from runtime.Callers,
+		// but if the caller does provide one, provide best-effort
+		// results by avoiding backing out of the function entirely.
 		if pc > entry {
-			// We store the pc of the start of the instruction following
-			// the instruction in question (the call or the inline mark).
-			// This is done for historical reasons, and to make FuncForPC
-			// work correctly for entries in the result of runtime.Callers.
 			pc--
 		}
 		// It's important that interpret pc non-strictly as cgoTraceback may
@@ -462,7 +468,30 @@ type modulehash struct {
 // To make sure the map isn't collected, we keep a second reference here.
 var pinnedTypemaps []map[typeOff]*_type
 
-var firstmoduledata moduledata  // linker symbol
+// aixStaticDataBase (used only on AIX) holds the unrelocated address
+// of the data section, set by the linker.
+//
+// On AIX, an R_ADDR relocation from an RODATA symbol to a DATA symbol
+// does not work, as the dynamic loader can change the address of the
+// data section, and it is not possible to apply a dynamic relocation
+// to RODATA. In order to get the correct address, we need to apply
+// the delta between unrelocated and relocated data section addresses.
+// aixStaticDataBase is the unrelocated address, and moduledata.data is
+// the relocated one.
+var aixStaticDataBase uintptr // linker symbol
+
+var firstmoduledata moduledata // linker symbol
+
+// lastmoduledatap should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//
+// Do not remove or change the type signature.
+// See go.dev/issues/67401.
+// See go.dev/issues/71672.
+//
+//go:linkname lastmoduledatap
 var lastmoduledatap *moduledata // linker symbol
 
 var modulesSlice *[]*moduledata // see activeModules
@@ -573,6 +602,16 @@ func moduledataverify() {
 
 const debugPcln = false
 
+// moduledataverify1 should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//
+// Do not remove or change the type signature.
+// See go.dev/issues/67401.
+// See go.dev/issues/71672.
+//
+//go:linkname moduledataverify1
 func moduledataverify1(datap *moduledata) {
 	// Check that the pclntab's format is valid.
 	hdr := datap.pcHeader
@@ -694,22 +733,24 @@ func (md *moduledata) funcName(nameOff int32) string {
 	return gostringnocopy(&md.funcnametab[nameOff])
 }
 
-// FuncForPC returns a *[Func] describing the function that contains the
-// given program counter address, or else nil.
-//
-// If pc represents multiple functions because of inlining, it returns
-// the *Func describing the innermost function, but with an entry of
-// the outermost function.
-//
-// For completely unclear reasons, even though they can import runtime,
-// some widely used packages access this using linkname.
+// Despite being an exported symbol,
+// FuncForPC is linknamed by widely used packages.
 // Notable members of the hall of shame include:
 //   - gitee.com/quant1x/gox
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
 //
+// Note that this comment is not part of the doc comment.
+//
 //go:linkname FuncForPC
+
+// FuncForPC returns a *[Func] describing the function that contains the
+// given program counter address, or else nil.
+//
+// If pc represents multiple functions because of inlining, it returns
+// the *Func describing the innermost function, but with an entry of
+// the outermost function.
 func FuncForPC(pc uintptr) *Func {
 	f := findfunc(pc)
 	if !f.valid() {

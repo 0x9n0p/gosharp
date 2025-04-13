@@ -78,6 +78,48 @@ func storeByType(t *types.Type) obj.As {
 	panic("bad store type")
 }
 
+// loadByType2 returns an opcode that can load consecutive memory locations into 2 registers with type t.
+// returns obj.AXXX if no such opcode exists.
+func loadByType2(t *types.Type) obj.As {
+	if t.IsFloat() {
+		switch t.Size() {
+		case 4:
+			return arm64.AFLDPS
+		case 8:
+			return arm64.AFLDPD
+		}
+	} else {
+		switch t.Size() {
+		case 4:
+			return arm64.ALDPW
+		case 8:
+			return arm64.ALDP
+		}
+	}
+	return obj.AXXX
+}
+
+// storeByType2 returns an opcode that can store registers with type t into 2 consecutive memory locations.
+// returns obj.AXXX if no such opcode exists.
+func storeByType2(t *types.Type) obj.As {
+	if t.IsFloat() {
+		switch t.Size() {
+		case 4:
+			return arm64.AFSTPS
+		case 8:
+			return arm64.AFSTPD
+		}
+	} else {
+		switch t.Size() {
+		case 4:
+			return arm64.ASTPW
+		case 8:
+			return arm64.ASTP
+		}
+	}
+	return obj.AXXX
+}
+
 // makeshift encodes a register shifted by a constant, used as an Offset in Prog.
 func makeshift(v *ssa.Value, reg int16, typ int64, s int64) int64 {
 	if s < 0 || s >= 64 {
@@ -105,13 +147,13 @@ func genIndexedOperand(op ssa.Op, base, idx int16) obj.Addr {
 	// Reg: base register, Index: (shifted) index register
 	mop := obj.Addr{Type: obj.TYPE_MEM, Reg: base}
 	switch op {
-	case ssa.OpARM64MOVDloadidx8, ssa.OpARM64MOVDstoreidx8, ssa.OpARM64MOVDstorezeroidx8,
+	case ssa.OpARM64MOVDloadidx8, ssa.OpARM64MOVDstoreidx8,
 		ssa.OpARM64FMOVDloadidx8, ssa.OpARM64FMOVDstoreidx8:
 		mop.Index = arm64.REG_LSL | 3<<5 | idx&31
-	case ssa.OpARM64MOVWloadidx4, ssa.OpARM64MOVWUloadidx4, ssa.OpARM64MOVWstoreidx4, ssa.OpARM64MOVWstorezeroidx4,
+	case ssa.OpARM64MOVWloadidx4, ssa.OpARM64MOVWUloadidx4, ssa.OpARM64MOVWstoreidx4,
 		ssa.OpARM64FMOVSloadidx4, ssa.OpARM64FMOVSstoreidx4:
 		mop.Index = arm64.REG_LSL | 2<<5 | idx&31
-	case ssa.OpARM64MOVHloadidx2, ssa.OpARM64MOVHUloadidx2, ssa.OpARM64MOVHstoreidx2, ssa.OpARM64MOVHstorezeroidx2:
+	case ssa.OpARM64MOVHloadidx2, ssa.OpARM64MOVHUloadidx2, ssa.OpARM64MOVHstoreidx2:
 		mop.Index = arm64.REG_LSL | 1<<5 | idx&31
 	default: // not shifted
 		mop.Index = idx
@@ -146,7 +188,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.From.Reg = x
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = y
-	case ssa.OpARM64MOVDnop:
+	case ssa.OpARM64MOVDnop, ssa.OpARM64ZERO:
 		// nothing to do
 	case ssa.OpLoadReg:
 		if v.Type.IsFlags() {
@@ -167,17 +209,38 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.From.Reg = v.Args[0].Reg()
 		ssagen.AddrAuto(&p.To, v)
 	case ssa.OpArgIntReg, ssa.OpArgFloatReg:
+		ssagen.CheckArgReg(v)
 		// The assembler needs to wrap the entry safepoint/stack growth code with spill/unspill
 		// The loop only runs once.
-		for _, a := range v.Block.Func.RegArgs {
-			// Pass the spill/unspill information along to the assembler, offset by size of
-			// the saved LR slot.
-			addr := ssagen.SpillSlotAddr(a, arm64.REGSP, base.Ctxt.Arch.FixedFrameSize)
-			s.FuncInfo().AddSpill(
-				obj.RegSpill{Reg: a.Reg, Addr: addr, Unspill: loadByType(a.Type), Spill: storeByType(a.Type)})
+		args := v.Block.Func.RegArgs
+		if len(args) == 0 {
+			break
 		}
-		v.Block.Func.RegArgs = nil
-		ssagen.CheckArgReg(v)
+		v.Block.Func.RegArgs = nil // prevent from running again
+
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			// Offset by size of the saved LR slot.
+			addr := ssagen.SpillSlotAddr(a, arm64.REGSP, base.Ctxt.Arch.FixedFrameSize)
+			// Look for double-register operations if we can.
+			if i < len(args)-1 {
+				b := args[i+1]
+				if a.Type.Size() == b.Type.Size() &&
+					a.Type.IsFloat() == b.Type.IsFloat() &&
+					b.Offset == a.Offset+a.Type.Size() {
+					ld := loadByType2(a.Type)
+					st := storeByType2(a.Type)
+					if ld != obj.AXXX && st != obj.AXXX {
+						s.FuncInfo().AddSpill(obj.RegSpill{Reg: a.Reg, Reg2: b.Reg, Addr: addr, Unspill: ld, Spill: st})
+						i++ // b is done also, skip it.
+						continue
+					}
+				}
+			}
+			// Pass the spill/unspill information along to the assembler.
+			s.FuncInfo().AddSpill(obj.RegSpill{Reg: a.Reg, Addr: addr, Unspill: loadByType(a.Type), Spill: storeByType(a.Type)})
+		}
+
 	case ssa.OpARM64ADD,
 		ssa.OpARM64SUB,
 		ssa.OpARM64AND,
@@ -453,7 +516,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		ssagen.AddAux(&p.From, v)
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = v.Reg()
-	case ssa.OpARM64LDP:
+	case ssa.OpARM64LDP, ssa.OpARM64LDPW, ssa.OpARM64LDPSW, ssa.OpARM64FLDPD, ssa.OpARM64FLDPS:
 		p := s.Prog(v.Op.Asm())
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = v.Args[0].Reg()
@@ -520,40 +583,11 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.To = genIndexedOperand(v.Op, v.Args[0].Reg(), v.Args[1].Reg())
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = v.Args[2].Reg()
-	case ssa.OpARM64STP:
+	case ssa.OpARM64STP, ssa.OpARM64STPW, ssa.OpARM64FSTPD, ssa.OpARM64FSTPS:
 		p := s.Prog(v.Op.Asm())
 		p.From.Type = obj.TYPE_REGREG
 		p.From.Reg = v.Args[1].Reg()
 		p.From.Offset = int64(v.Args[2].Reg())
-		p.To.Type = obj.TYPE_MEM
-		p.To.Reg = v.Args[0].Reg()
-		ssagen.AddAux(&p.To, v)
-	case ssa.OpARM64MOVBstorezero,
-		ssa.OpARM64MOVHstorezero,
-		ssa.OpARM64MOVWstorezero,
-		ssa.OpARM64MOVDstorezero:
-		p := s.Prog(v.Op.Asm())
-		p.From.Type = obj.TYPE_REG
-		p.From.Reg = arm64.REGZERO
-		p.To.Type = obj.TYPE_MEM
-		p.To.Reg = v.Args[0].Reg()
-		ssagen.AddAux(&p.To, v)
-	case ssa.OpARM64MOVBstorezeroidx,
-		ssa.OpARM64MOVHstorezeroidx,
-		ssa.OpARM64MOVWstorezeroidx,
-		ssa.OpARM64MOVDstorezeroidx,
-		ssa.OpARM64MOVHstorezeroidx2,
-		ssa.OpARM64MOVWstorezeroidx4,
-		ssa.OpARM64MOVDstorezeroidx8:
-		p := s.Prog(v.Op.Asm())
-		p.To = genIndexedOperand(v.Op, v.Args[0].Reg(), v.Args[1].Reg())
-		p.From.Type = obj.TYPE_REG
-		p.From.Reg = arm64.REGZERO
-	case ssa.OpARM64MOVQstorezero:
-		p := s.Prog(v.Op.Asm())
-		p.From.Type = obj.TYPE_REGREG
-		p.From.Reg = arm64.REGZERO
-		p.From.Offset = int64(arm64.REGZERO)
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		ssagen.AddAux(&p.To, v)
@@ -1264,24 +1298,7 @@ var gtJumps = [2][2]ssagen.IndexJump{
 
 func ssaGenBlock(s *ssagen.State, b, next *ssa.Block) {
 	switch b.Kind {
-	case ssa.BlockPlain:
-		if b.Succs[0].Block() != next {
-			p := s.Prog(obj.AJMP)
-			p.To.Type = obj.TYPE_BRANCH
-			s.Branches = append(s.Branches, ssagen.Branch{P: p, B: b.Succs[0].Block()})
-		}
-
-	case ssa.BlockDefer:
-		// defer returns in R0:
-		// 0 if we should continue executing
-		// 1 if we should jump to deferreturn call
-		p := s.Prog(arm64.ACMP)
-		p.From.Type = obj.TYPE_CONST
-		p.From.Offset = 0
-		p.Reg = arm64.REG_R0
-		p = s.Prog(arm64.ABNE)
-		p.To.Type = obj.TYPE_BRANCH
-		s.Branches = append(s.Branches, ssagen.Branch{P: p, B: b.Succs[1].Block()})
+	case ssa.BlockPlain, ssa.BlockDefer:
 		if b.Succs[0].Block() != next {
 			p := s.Prog(obj.AJMP)
 			p.To.Type = obj.TYPE_BRANCH

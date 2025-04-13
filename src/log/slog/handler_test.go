@@ -10,7 +10,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog/internal/buffer"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -528,6 +531,20 @@ func TestJSONAndTextHandlers(t *testing.T) {
 			wantText: "name.first=Perry name.last=Platypus",
 			wantJSON: `{"name":{"first":"Perry","last":"Platypus"}}`,
 		},
+		{
+			name:    "group and key (or both) needs quoting",
+			replace: removeKeys(TimeKey, LevelKey),
+			attrs: []Attr{
+				Group("prefix",
+					String(" needs quoting ", "v"), String("NotNeedsQuoting", "v"),
+				),
+				Group("prefix needs quoting",
+					String(" needs quoting ", "v"), String("NotNeedsQuoting", "v"),
+				),
+			},
+			wantText: `msg=message "prefix. needs quoting "=v prefix.NotNeedsQuoting=v "prefix needs quoting. needs quoting "=v "prefix needs quoting.NotNeedsQuoting"=v`,
+			wantJSON: `{"msg":"message","prefix":{" needs quoting ":"v","NotNeedsQuoting":"v"},"prefix needs quoting":{" needs quoting ":"v","NotNeedsQuoting":"v"}}`,
+		},
 	} {
 		r := NewRecord(testTime, LevelInfo, "message", callerPC(2))
 		line := strconv.Itoa(r.source().Line)
@@ -709,5 +726,53 @@ func BenchmarkWriteTime(b *testing.B) {
 	var buf []byte
 	for i := 0; i < b.N; i++ {
 		buf = appendRFC3339Millis(buf[:0], tm)
+	}
+}
+
+func TestDiscardHandler(t *testing.T) {
+	ctx := context.Background()
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = nil, nil // panic on write
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = stdout, stderr
+	})
+
+	// Just ensure nothing panics during normal usage
+	l := New(DiscardHandler)
+	l.Info("msg", "a", 1, "b", 2)
+	l.Debug("bg", Int("a", 1), "b", 2)
+	l.Warn("w", Duration("dur", 3*time.Second))
+	l.Error("bad", "a", 1)
+	l.Log(ctx, LevelWarn+1, "w", Int("a", 1), String("b", "two"))
+	l.LogAttrs(ctx, LevelInfo+1, "a b c", Int("a", 1), String("b", "two"))
+	l.Info("info", "a", []Attr{Int("i", 1)})
+	l.Info("info", "a", GroupValue(Int("i", 1)))
+}
+
+func BenchmarkAppendKey(b *testing.B) {
+	for _, size := range []int{5, 10, 30, 50, 100} {
+		for _, quoting := range []string{"no_quoting", "pre_quoting", "key_quoting", "both_quoting"} {
+			b.Run(fmt.Sprintf("%s_prefix_size_%d", quoting, size), func(b *testing.B) {
+				var (
+					hs     = NewJSONHandler(io.Discard, nil).newHandleState(buffer.New(), false, "")
+					prefix = bytes.Repeat([]byte("x"), size)
+					key    = "key"
+				)
+
+				if quoting == "pre_quoting" || quoting == "both_quoting" {
+					prefix[0] = '"'
+				}
+				if quoting == "key_quoting" || quoting == "both_quoting" {
+					key = "ke\""
+				}
+
+				hs.prefix = (*buffer.Buffer)(&prefix)
+
+				for b.Loop() {
+					hs.appendKey(key)
+					hs.buf.Reset()
+				}
+			})
+		}
 	}
 }

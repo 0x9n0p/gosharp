@@ -11,7 +11,6 @@ import (
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"cmd/internal/src"
-	"internal/buildcfg"
 )
 
 // A Config holds readonly compilation information.
@@ -37,24 +36,20 @@ type Config struct {
 	floatParamRegs []int8         // register numbers of floating param (in/out) registers
 	ABI1           *abi.ABIConfig // "ABIInternal" under development // TODO change comment when this becomes current
 	ABI0           *abi.ABIConfig
-	GCRegMap       []*Register // garbage collector register map, by GC register index
-	FPReg          int8        // register number of frame pointer, -1 if not used
-	LinkReg        int8        // register number of link register if it is a general purpose register, -1 if not used
-	hasGReg        bool        // has hardware g register
-	ctxt           *obj.Link   // Generic arch information
-	optimize       bool        // Do optimization
-	noDuffDevice   bool        // Don't use Duff's device
-	useSSE         bool        // Use SSE for non-float operations
-	useAvg         bool        // Use optimizations that need Avg* operations
-	useHmul        bool        // Use optimizations that need Hmul* operations
-	SoftFloat      bool        //
-	Race           bool        // race detector enabled
-	BigEndian      bool        //
-	UseFMA         bool        // Use hardware FMA operation
-	unalignedOK    bool        // Unaligned loads/stores are ok
-	haveBswap64    bool        // architecture implements Bswap64
-	haveBswap32    bool        // architecture implements Bswap32
-	haveBswap16    bool        // architecture implements Bswap16
+	FPReg          int8      // register number of frame pointer, -1 if not used
+	LinkReg        int8      // register number of link register if it is a general purpose register, -1 if not used
+	hasGReg        bool      // has hardware g register
+	ctxt           *obj.Link // Generic arch information
+	optimize       bool      // Do optimization
+	useAvg         bool      // Use optimizations that need Avg* operations
+	useHmul        bool      // Use optimizations that need Hmul* operations
+	SoftFloat      bool      //
+	Race           bool      // race detector enabled
+	BigEndian      bool      //
+	unalignedOK    bool      // Unaligned loads/stores are ok
+	haveBswap64    bool      // architecture implements Bswap64
+	haveBswap32    bool      // architecture implements Bswap32
+	haveBswap16    bool      // architecture implements Bswap16
 }
 
 type (
@@ -288,6 +283,7 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegLOONG64
 		c.LinkReg = linkRegLOONG64
 		c.hasGReg = true
+		c.unalignedOK = true
 	case "s390x":
 		c.PtrSize = 8
 		c.RegSize = 8
@@ -299,7 +295,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegS390X
 		c.LinkReg = linkRegS390X
 		c.hasGReg = true
-		c.noDuffDevice = true
 		c.BigEndian = true
 		c.unalignedOK = true
 		c.haveBswap64 = true
@@ -320,7 +315,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegMIPS
 		c.LinkReg = linkRegMIPS
 		c.hasGReg = true
-		c.noDuffDevice = true
 	case "riscv64":
 		c.PtrSize = 8
 		c.RegSize = 8
@@ -348,7 +342,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegWasm
 		c.LinkReg = linkRegWasm
 		c.hasGReg = true
-		c.noDuffDevice = true
 		c.useAvg = false
 		c.useHmul = false
 	default:
@@ -356,8 +349,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 	}
 	c.ctxt = ctxt
 	c.optimize = optimize
-	c.useSSE = true
-	c.UseFMA = true
 	c.SoftFloat = softfloat
 	if softfloat {
 		c.floatParamRegs = nil // no FP registers in softfloat mode
@@ -366,38 +357,11 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 	c.ABI0 = abi.NewABIConfig(0, 0, ctxt.Arch.FixedFrameSize, 0)
 	c.ABI1 = abi.NewABIConfig(len(c.intParamRegs), len(c.floatParamRegs), ctxt.Arch.FixedFrameSize, 1)
 
-	// On Plan 9, floating point operations are not allowed in note handler.
-	if buildcfg.GOOS == "plan9" {
-		// Don't use FMA on Plan 9
-		c.UseFMA = false
-
-		// Don't use Duff's device and SSE on Plan 9 AMD64.
-		if arch == "amd64" {
-			c.noDuffDevice = true
-			c.useSSE = false
-		}
-	}
-
 	if ctxt.Flag_shared {
 		// LoweredWB is secretly a CALL and CALLs on 386 in
 		// shared mode get rewritten by obj6.go to go through
 		// the GOT, which clobbers BX.
 		opcodeTable[Op386LoweredWB].reg.clobbers |= 1 << 3 // BX
-	}
-
-	// Create the GC register map index.
-	// TODO: This is only used for debug printing. Maybe export config.registers?
-	gcRegMapSize := int16(0)
-	for _, r := range c.registers {
-		if r.gcNum+1 > gcRegMapSize {
-			gcRegMapSize = r.gcNum + 1
-		}
-	}
-	c.GCRegMap = make([]*Register, gcRegMapSize)
-	for i, r := range c.registers {
-		if r.gcNum != -1 {
-			c.GCRegMap[r.gcNum] = &c.registers[i]
-		}
 	}
 
 	return c

@@ -2,21 +2,34 @@
 
 ### Go command {#go-command}
 
+The `go build` `-asan` option now defaults to doing leak detection at
+program exit.
+This will report an error if memory allocated by C is not freed and is
+not referenced by any other memory allocated by either C or Go.
+These new error reports may be disabled by setting
+`ASAN_OPTIONS=detect_leaks=0` in the environment when running the
+program.
+
+<!-- go.dev/issue/71294 -->
+
+The new `work` package pattern matches all packages in the work (formerly called main)
+modules: either the single work module in module mode or the set of workspace modules
+in workspace mode.
+
+<!-- go.dev/issue/65847 -->
+
+When the go command updates the `go` line in a `go.mod` or `go.work` file,
+it [no longer](/ref/mod#go-mod-file-toolchain) adds a toolchain line
+specifying the command's current version.
+
 ### Cgo {#cgo}
 
-Cgo currently refuses to compile calls to a C function which has multiple
-incompatible declarations. For instance, if `f` is declared as both `void f(int)`
-and `void f(double)`, cgo will report an error instead of possibly generating an
-incorrect call sequence for `f(0)`. New in this release is a better detector for
-this error condition when the incompatible declarations appear in different
-files. See [#67699](/issue/67699).
+### Vet {#vet}
 
-### Vet
+<!-- go.dev/issue/18022 -->
 
-The new `tests` analyzer reports common mistakes in declarations of
-tests, fuzzers, benchmarks, and examples in test packages, such as
-malformed names, incorrect signatures, or examples that document
-non-existent identifiers. Some of these mistakes may cause tests not
-to run.
+The `go vet` command now includes the
+[waitgroup](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/waitgroup)
+analyzer, which reports misplaced calls to [sync.WaitGroup.Add].
 
-This analyzer is among the subset of analyzers that are run by `go test`.
+

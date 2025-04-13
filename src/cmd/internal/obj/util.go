@@ -272,8 +272,14 @@ func writeDconv(w io.Writer, p *Prog, a *Addr, abiDetail bool) {
 		} else {
 			io.WriteString(w, Rconv(int(a.Reg)))
 		}
+
 		if (RBaseARM64+1<<10+1<<9) /* arm64.REG_ELEM */ <= a.Reg &&
 			a.Reg < (RBaseARM64+1<<11) /* arm64.REG_ELEM_END */ {
+			fmt.Fprintf(w, "[%d]", a.Index)
+		}
+
+		if (RBaseLOONG64+(1<<10)+(1<<11)) /* loong64.REG_ELEM */ <= a.Reg &&
+			a.Reg < (RBaseLOONG64+(1<<10)+(2<<11)) /* loong64.REG_ELEM_END */ {
 			fmt.Fprintf(w, "[%d]", a.Index)
 		}
 
@@ -513,7 +519,7 @@ const (
 	RBaseS390X   = 14 * 1024 // range [14k, 15k)
 	RBaseRISCV   = 15 * 1024 // range [15k, 16k)
 	RBaseWasm    = 16 * 1024
-	RBaseLOONG64 = 17 * 1024
+	RBaseLOONG64 = 19 * 1024 // range [19K, 22k)
 )
 
 // RegisterRegister binds a pretty-printer (Rconv) for register
@@ -584,6 +590,13 @@ type spcSet struct {
 }
 
 var spcSpace []spcSet
+
+// Each architecture is allotted a distinct subspace: [Lo, Hi) for declaring its
+// arch-specific special operands.
+const (
+	SpecialOperandARM64Base = 0 << 16
+	SpecialOperandRISCVBase = 1 << 16
+)
 
 // RegisterSpecialOperands binds a pretty-printer (SPCconv) for special
 // operand numbers to a given special operand number range. Lo is inclusive,
@@ -711,7 +724,7 @@ func AlignmentPaddingLength(pc int32, p *Prog, ctxt *Link) int {
 	// emit as many as s bytes of padding to obtain alignment
 	s := p.To.Offset
 	if s < 0 || s >= a {
-		ctxt.Diag("PCALIGNMAX 'amount' %d must be non-negative and smaller than the aligment %d\n", s, a)
+		ctxt.Diag("PCALIGNMAX 'amount' %d must be non-negative and smaller than the alignment %d\n", s, a)
 		return 0
 	}
 	if s >= a-lob {

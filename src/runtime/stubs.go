@@ -312,16 +312,19 @@ func asmcgocall(fn, arg unsafe.Pointer) int32
 
 func morestack()
 
+// morestack_noctxt should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/bytedance/sonic
+//
+// Do not remove or change the type signature.
+// See go.dev/issues/67401.
+// See go.dev/issues/71672.
+//
+//go:linkname morestack_noctxt
 func morestack_noctxt()
 
 func rt0_go()
-
-// return0 is a stub used to return 0 from deferproc.
-// It is called at the very end of deferproc to signal
-// the calling Go function that it should not jump
-// to deferreturn.
-// in asm_*.s
-func return0()
 
 // in asm_*.s
 // not called directly; definitions here supply type information for traceback.
@@ -371,6 +374,8 @@ func alignDown(n, a uintptr) uintptr {
 }
 
 // divRoundUp returns ceil(n / a).
+//
+//go:nosplit
 func divRoundUp(n, a uintptr) uintptr {
 	// a is generally a power of two. This will get inlined and
 	// the compiler will optimize the division.

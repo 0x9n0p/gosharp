@@ -5,6 +5,7 @@
 package sync_test
 
 import (
+	isync "internal/sync"
 	"internal/testenv"
 	"math/rand"
 	"reflect"
@@ -133,6 +134,10 @@ func applyDeepCopyMap(calls []mapCall) ([]mapResult, map[any]any) {
 	return applyCalls(new(DeepCopyMap), calls)
 }
 
+func applyHashTrieMap(calls []mapCall) ([]mapResult, map[any]any) {
+	return applyCalls(new(isync.HashTrieMap[any, any]), calls)
+}
+
 func TestMapMatchesRWMutex(t *testing.T) {
 	if err := quick.CheckEqual(applyMap, applyRWMutexMap, nil); err != nil {
 		t.Error(err)
@@ -141,6 +146,12 @@ func TestMapMatchesRWMutex(t *testing.T) {
 
 func TestMapMatchesDeepCopy(t *testing.T) {
 	if err := quick.CheckEqual(applyMap, applyDeepCopyMap, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestMapMatchesHashTrieMap(t *testing.T) {
+	if err := quick.CheckEqual(applyMap, applyHashTrieMap, nil); err != nil {
 		t.Error(err)
 	}
 }
@@ -214,15 +225,13 @@ func TestIssue40999(t *testing.T) {
 	// add an initial entry to bias len(m.dirty) above the miss count.
 	m.Store(nil, struct{}{})
 
-	var finalized uint32
+	var cleanedUp uint32
 
-	// Set finalizers that count for collected keys. A non-zero count
+	// Add cleanups that count for collected keys. A non-zero count
 	// indicates that keys have not been leaked.
-	for atomic.LoadUint32(&finalized) == 0 {
+	for atomic.LoadUint32(&cleanedUp) == 0 {
 		p := new(int)
-		runtime.SetFinalizer(p, func(*int) {
-			atomic.AddUint32(&finalized, 1)
-		})
+		runtime.AddCleanup(p, func(c *uint32) { atomic.AddUint32(c, 1) }, &cleanedUp)
 		m.Store(p, struct{}{})
 		m.Delete(p)
 		runtime.GC()
@@ -347,13 +356,13 @@ func TestConcurrentClear(t *testing.T) {
 	})
 }
 
-func TestMapClearNoAllocations(t *testing.T) {
+func TestMapClearOneAllocation(t *testing.T) {
 	testenv.SkipIfOptimizationOff(t)
 	var m sync.Map
 	allocs := testing.AllocsPerRun(10, func() {
 		m.Clear()
 	})
-	if allocs > 0 {
-		t.Errorf("AllocsPerRun of m.Clear = %v; want 0", allocs)
+	if allocs > 1 {
+		t.Errorf("AllocsPerRun of m.Clear = %v; want 1", allocs)
 	}
 }

@@ -61,7 +61,7 @@ func ASanSupported(goos, goarch string) bool {
 // ('go test -fuzz=.').
 func FuzzSupported(goos, goarch string) bool {
 	switch goos {
-	case "darwin", "freebsd", "linux", "windows":
+	case "darwin", "freebsd", "linux", "openbsd", "windows":
 		return true
 	default:
 		return false
@@ -208,7 +208,7 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 
 	case "plugin":
 		switch platform {
-		case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/loong64", "linux/s390x", "linux/ppc64le",
+		case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/loong64", "linux/riscv64", "linux/s390x", "linux/ppc64le",
 			"android/amd64", "android/386",
 			"darwin/amd64", "darwin/arm64",
 			"freebsd/amd64":
@@ -281,7 +281,7 @@ func FirstClass(goos, goarch string) bool {
 	return distInfo[OSArch{goos, goarch}].FirstClass
 }
 
-// Broken reportsr whether goos/goarch is considered a broken port.
+// Broken reports whether goos/goarch is considered a broken port.
 // (See https://go.dev/wiki/PortingPolicy#broken-ports.)
 func Broken(goos, goarch string) bool {
 	return distInfo[OSArch{goos, goarch}].Broken

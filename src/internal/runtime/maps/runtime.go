@@ -11,6 +11,9 @@ import (
 
 // Functions below pushed from runtime.
 
+//go:linkname fatal
+func fatal(s string)
+
 //go:linkname rand
 func rand() uint64
 
@@ -22,3 +25,6 @@ func typedmemclr(typ *abi.Type, ptr unsafe.Pointer)
 
 //go:linkname newarray
 func newarray(typ *abi.Type, n int) unsafe.Pointer
+
+//go:linkname newobject
+func newobject(typ *abi.Type) unsafe.Pointer

@@ -15,6 +15,7 @@ import (
 	"internal/syscall/unix"
 	"internal/testenv"
 	"io"
+	"iter"
 	"math"
 	"math/big"
 	"os"
@@ -415,27 +416,6 @@ func parseProfile(t *testing.T, valBytes []byte, f func(uintptr, []*profile.Loca
 	return p
 }
 
-func cpuProfilingBroken() bool {
-	switch runtime.GOOS {
-	case "plan9":
-		// Profiling unimplemented.
-		return true
-	case "aix":
-		// See https://golang.org/issue/45170.
-		return true
-	case "ios", "dragonfly", "netbsd", "illumos", "solaris":
-		// See https://golang.org/issue/13841.
-		return true
-	case "openbsd":
-		if runtime.GOARCH == "arm" || runtime.GOARCH == "arm64" {
-			// See https://golang.org/issue/13841.
-			return true
-		}
-	}
-
-	return false
-}
-
 // testCPUProfile runs f under the CPU profiler, checking for some conditions specified by need,
 // as interpreted by matches, and returns the parsed profile.
 func testCPUProfile(t *testing.T, matches profileMatchFunc, f func(dur time.Duration)) *profile.Profile {
@@ -453,7 +433,7 @@ func testCPUProfile(t *testing.T, matches profileMatchFunc, f func(dur time.Dura
 		t.Skip("skipping on wasip1")
 	}
 
-	broken := cpuProfilingBroken()
+	broken := testenv.CPUProfilingBroken()
 
 	deadline, ok := t.Deadline()
 	if broken || !ok {
@@ -1228,7 +1208,7 @@ func blockFrequentShort(rate int) {
 	}
 }
 
-// blockFrequentShort produces 10000 block events with an average duration of
+// blockInfrequentLong produces 10000 block events with an average duration of
 // rate.
 func blockInfrequentLong(rate int) {
 	for i := 0; i < 10000; i++ {
@@ -1481,11 +1461,11 @@ func TestGoroutineCounts(t *testing.T) {
 	goroutineProf.WriteTo(&w, 1)
 	prof := w.String()
 
-	labels := labelMap{"label": "value"}
+	labels := labelMap{Labels("label", "value")}
 	labelStr := "\n# labels: " + labels.String()
-	selfLabel := labelMap{"self-label": "self-value"}
+	selfLabel := labelMap{Labels("self-label", "self-value")}
 	selfLabelStr := "\n# labels: " + selfLabel.String()
-	fingLabel := labelMap{"fing-label": "fing-value"}
+	fingLabel := labelMap{Labels("fing-label", "fing-value")}
 	fingLabelStr := "\n# labels: " + fingLabel.String()
 	orderedPrefix := []string{
 		"\n50 @ ",
@@ -1598,7 +1578,7 @@ func TestGoroutineProfileConcurrency(t *testing.T) {
 	}
 
 	includesFinalizer := func(s string) bool {
-		return strings.Contains(s, "runtime.runfinq")
+		return strings.Contains(s, "runtime.runFinalizersAndCleanups")
 	}
 
 	// Concurrent calls to the goroutine profiler should not trigger data races
@@ -1782,6 +1762,50 @@ func TestGoroutineProfileConcurrency(t *testing.T) {
 		// Run multiple times to shake out data races
 		t.Run("goroutine launches", testLaunches)
 	}
+}
+
+// Regression test for #69998.
+func TestGoroutineProfileCoro(t *testing.T) {
+	testenv.MustHaveParallelism(t)
+
+	goroutineProf := Lookup("goroutine")
+
+	// Set up a goroutine to just create and run coroutine goroutines all day.
+	iterFunc := func() {
+		p, stop := iter.Pull2(
+			func(yield func(int, int) bool) {
+				for i := 0; i < 10000; i++ {
+					if !yield(i, i) {
+						return
+					}
+				}
+			},
+		)
+		defer stop()
+		for {
+			_, _, ok := p()
+			if !ok {
+				break
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			iterFunc()
+			select {
+			case <-done:
+			default:
+			}
+		}
+	}()
+
+	// Take a goroutine profile. If the bug in #69998 is present, this will crash
+	// with high probability. We don't care about the output for this bug.
+	goroutineProf.WriteTo(io.Discard, 1)
 }
 
 func BenchmarkGoroutine(b *testing.B) {
@@ -2041,7 +2065,7 @@ func TestLabelSystemstack(t *testing.T) {
 					// which part of the function they are
 					// at.
 					mayBeLabeled = true
-				case "runtime.bgsweep", "runtime.bgscavenge", "runtime.forcegchelper", "runtime.gcBgMarkWorker", "runtime.runfinq", "runtime.sysmon":
+				case "runtime.bgsweep", "runtime.bgscavenge", "runtime.forcegchelper", "runtime.gcBgMarkWorker", "runtime.runFinalizersAndCleanups", "runtime.sysmon":
 					// Runtime system goroutines or threads
 					// (such as those identified by
 					// runtime.isSystemGoroutine). These
@@ -2500,34 +2524,41 @@ func TestProfilerStackDepth(t *testing.T) {
 			t.Logf("Profile = %v", p)
 
 			stks := profileStacks(p)
-			var stk []string
-			for _, s := range stks {
-				if hasPrefix(s, test.prefix) {
-					stk = s
-					break
+			var matchedStacks [][]string
+			for _, stk := range stks {
+				if !hasPrefix(stk, test.prefix) {
+					continue
 				}
+				// We may get multiple stacks which contain the prefix we want, but
+				// which might not have enough frames, e.g. if the profiler hides
+				// some leaf frames that would count against the stack depth limit.
+				// Check for at least one match
+				matchedStacks = append(matchedStacks, stk)
+				if len(stk) != depth {
+					continue
+				}
+				if rootFn, wantFn := stk[depth-1], "runtime/pprof.produceProfileEvents"; rootFn != wantFn {
+					continue
+				}
+				// Found what we wanted
+				return
 			}
-			if len(stk) != depth {
-				t.Fatalf("want stack depth = %d, got %d", depth, len(stk))
-			}
+			for _, stk := range matchedStacks {
+				t.Logf("matched stack=%s", stk)
+				if len(stk) != depth {
+					t.Errorf("want stack depth = %d, got %d", depth, len(stk))
+				}
 
-			if rootFn, wantFn := stk[depth-1], "runtime/pprof.produceProfileEvents"; rootFn != wantFn {
-				t.Fatalf("want stack stack root %s, got %v", wantFn, rootFn)
+				if rootFn, wantFn := stk[depth-1], "runtime/pprof.produceProfileEvents"; rootFn != wantFn {
+					t.Errorf("want stack stack root %s, got %v", wantFn, rootFn)
+				}
 			}
 		})
 	}
 }
 
 func hasPrefix(stk []string, prefix []string) bool {
-	if len(prefix) > len(stk) {
-		return false
-	}
-	for i := range prefix {
-		if stk[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
+	return len(prefix) <= len(stk) && slices.Equal(stk[:len(prefix)], prefix)
 }
 
 // ensure that stack records are valid map keys (comparable)

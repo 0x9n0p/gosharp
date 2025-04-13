@@ -17,6 +17,14 @@ type mapType struct {
 	abi.OldMapType
 }
 
+// Pushed from runtime.
+
+//go:noescape
+func mapiterinit(t *abi.Type, m unsafe.Pointer, it *hiter)
+
+//go:noescape
+func mapiternext(it *hiter)
+
 func (t *rtype) Key() Type {
 	if t.Kind() != Map {
 		panic("reflect: Key of non-map type " + t.String())
@@ -256,6 +264,7 @@ type hiter struct {
 	i           uint8
 	bucket      uintptr
 	checkBucket uintptr
+	clearSeq    uint64
 }
 
 func (h *hiter) initialized() bool {
@@ -288,6 +297,7 @@ func (iter *MapIter) Key() Value {
 // It is equivalent to v.Set(iter.Key()), but it avoids allocating a new Value.
 // As in Go, the key must be assignable to v's type and
 // must not be derived from an unexported field.
+// It panics if [Value.CanSet] returns false.
 func (v Value) SetIterKey(iter *MapIter) {
 	if !iter.hiter.initialized() {
 		panic("reflect: Value.SetIterKey called before Next")
@@ -331,6 +341,7 @@ func (iter *MapIter) Value() Value {
 // It is equivalent to v.Set(iter.Value()), but it avoids allocating a new Value.
 // As in Go, the value must be assignable to v's type and
 // must not be derived from an unexported field.
+// It panics if [Value.CanSet] returns false.
 func (v Value) SetIterValue(iter *MapIter) {
 	if !iter.hiter.initialized() {
 		panic("reflect: Value.SetIterValue called before Next")

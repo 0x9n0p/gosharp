@@ -9,6 +9,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"internal/cpu"
 	"internal/goarch"
 	"internal/runtime/atomic"
@@ -108,9 +109,9 @@ type mheap struct {
 
 	// Page reclaimer state
 
-	// reclaimIndex is the page index in allArenas of next page to
+	// reclaimIndex is the page index in heapArenas of next page to
 	// reclaim. Specifically, it refers to page (i %
-	// pagesPerArena) of arena allArenas[i / pagesPerArena].
+	// pagesPerArena) of arena heapArenas[i / pagesPerArena].
 	//
 	// If this is >= 1<<63, the page reclaimer is done scanning
 	// the page marks.
@@ -165,22 +166,31 @@ type mheap struct {
 	// (the actual arenas). This is only used on 32-bit.
 	arena linearAlloc
 
-	// allArenas is the arenaIndex of every mapped arena. This can
-	// be used to iterate through the address space.
+	// heapArenas is the arenaIndex of every mapped arena mapped for the heap.
+	// This can be used to iterate through the heap address space.
 	//
 	// Access is protected by mheap_.lock. However, since this is
 	// append-only and old backing arrays are never freed, it is
 	// safe to acquire mheap_.lock, copy the slice header, and
 	// then release mheap_.lock.
-	allArenas []arenaIdx
+	heapArenas []arenaIdx
 
-	// sweepArenas is a snapshot of allArenas taken at the
+	// userArenaArenas is the arenaIndex of every mapped arena mapped for
+	// user arenas.
+	//
+	// Access is protected by mheap_.lock. However, since this is
+	// append-only and old backing arrays are never freed, it is
+	// safe to acquire mheap_.lock, copy the slice header, and
+	// then release mheap_.lock.
+	userArenaArenas []arenaIdx
+
+	// sweepArenas is a snapshot of heapArenas taken at the
 	// beginning of the sweep cycle. This can be read safely by
 	// simply blocking GC (by disabling preemption).
 	sweepArenas []arenaIdx
 
-	// markArenas is a snapshot of allArenas taken at the beginning
-	// of the mark cycle. Because allArenas is append-only, neither
+	// markArenas is a snapshot of heapArenas taken at the beginning
+	// of the mark cycle. Because heapArenas is append-only, neither
 	// this slice nor its contents will change during the mark, so
 	// it can be read safely.
 	markArenas []arenaIdx
@@ -204,6 +214,7 @@ type mheap struct {
 	spanalloc              fixalloc // allocator for span*
 	cachealloc             fixalloc // allocator for mcache*
 	specialfinalizeralloc  fixalloc // allocator for specialfinalizer*
+	specialCleanupAlloc    fixalloc // allocator for specialcleanup*
 	specialprofilealloc    fixalloc // allocator for specialprofile*
 	specialReachableAlloc  fixalloc // allocator for specialReachable
 	specialPinCounterAlloc fixalloc // allocator for specialPinCounter
@@ -229,6 +240,16 @@ type mheap struct {
 		// readyList is a list of empty user arena spans that are ready for reuse.
 		readyList mSpanList
 	}
+
+	// cleanupID is a counter which is incremented each time a cleanup special is added
+	// to a span. It's used to create globally unique identifiers for individual cleanup.
+	// cleanupID is protected by mheap_.lock. It should only be incremented while holding
+	// the lock.
+	cleanupID uint64
+
+	_ cpu.CacheLinePad
+
+	immortalWeakHandles immortalWeakHandleMap
 
 	unused *specialfinalizer // never set, just here to force the specialfinalizer type into DWARF
 }
@@ -527,7 +548,7 @@ func recordspan(vh unsafe.Pointer, p unsafe.Pointer) {
 		}
 		var new []*mspan
 		sp := (*slice)(unsafe.Pointer(&new))
-		sp.array = sysAlloc(uintptr(n)*goarch.PtrSize, &memstats.other_sys)
+		sp.array = sysAlloc(uintptr(n)*goarch.PtrSize, &memstats.other_sys, "allspans array")
 		if sp.array == nil {
 			throw("runtime: cannot allocate memory")
 		}
@@ -743,6 +764,7 @@ func (h *mheap) init() {
 	h.spanalloc.init(unsafe.Sizeof(mspan{}), recordspan, unsafe.Pointer(h), &memstats.mspan_sys)
 	h.cachealloc.init(unsafe.Sizeof(mcache{}), nil, nil, &memstats.mcache_sys)
 	h.specialfinalizeralloc.init(unsafe.Sizeof(specialfinalizer{}), nil, nil, &memstats.other_sys)
+	h.specialCleanupAlloc.init(unsafe.Sizeof(specialCleanup{}), nil, nil, &memstats.other_sys)
 	h.specialprofilealloc.init(unsafe.Sizeof(specialprofile{}), nil, nil, &memstats.other_sys)
 	h.specialReachableAlloc.init(unsafe.Sizeof(specialReachable{}), nil, nil, &memstats.other_sys)
 	h.specialPinCounterAlloc.init(unsafe.Sizeof(specialPinCounter{}), nil, nil, &memstats.other_sys)
@@ -1486,7 +1508,7 @@ func (h *mheap) grow(npage uintptr) (uintptr, bool) {
 		// Not enough room in the current arena. Allocate more
 		// arena space. This may not be contiguous with the
 		// current arena, so we have to request the full ask.
-		av, asize := h.sysAlloc(ask, &h.arenaHints, true)
+		av, asize := h.sysAlloc(ask, &h.arenaHints, &h.heapArenas)
 		if av == nil {
 			inUse := gcController.heapFree.load() + gcController.heapReleased.load() + gcController.heapInUse.load()
 			print("runtime: out of memory: cannot allocate ", ask, "-byte block (", inUse, " in use)\n")
@@ -1505,7 +1527,7 @@ func (h *mheap) grow(npage uintptr) (uintptr, bool) {
 				// Transition this space from Reserved to Prepared and mark it
 				// as released since we'll be able to start using it after updating
 				// the page allocator and releasing the lock at any time.
-				sysMap(unsafe.Pointer(h.curArena.base), size, &gcController.heapReleased)
+				sysMap(unsafe.Pointer(h.curArena.base), size, &gcController.heapReleased, "heap")
 				// Update stats.
 				stats := memstats.heapStats.acquire()
 				atomic.Xaddint64(&stats.released, int64(size))
@@ -1536,7 +1558,7 @@ func (h *mheap) grow(npage uintptr) (uintptr, bool) {
 	// The allocation is always aligned to the heap arena
 	// size which is always > physPageSize, so its safe to
 	// just add directly to heapReleased.
-	sysMap(unsafe.Pointer(v), nBase-v, &gcController.heapReleased)
+	sysMap(unsafe.Pointer(v), nBase-v, &gcController.heapReleased, "heap")
 
 	// The memory just allocated counts as both released
 	// and idle, even though it's not yet backed by spans.
@@ -1824,12 +1846,14 @@ const (
 	// _KindSpecialPinCounter is a special used for objects that are pinned
 	// multiple times
 	_KindSpecialPinCounter = 5
+	// _KindSpecialCleanup is for tracking cleanups.
+	_KindSpecialCleanup = 6
 )
 
 type special struct {
 	_      sys.NotInHeap
 	next   *special // linked list in span
-	offset uint16   // span offset of object
+	offset uintptr  // span offset of object
 	kind   byte     // kind of special
 }
 
@@ -1849,13 +1873,13 @@ func spanHasNoSpecials(s *mspan) {
 	atomic.And8(&ha.pageSpecials[arenaPage/8], ^(uint8(1) << (arenaPage % 8)))
 }
 
-// Adds the special record s to the list of special records for
+// addspecial adds the special record s to the list of special records for
 // the object p. All fields of s should be filled in except for
 // offset & next, which this routine will fill in.
 // Returns true if the special was successfully added, false otherwise.
 // (The add will fail only if a record with the same p and s->kind
-// already exists.)
-func addspecial(p unsafe.Pointer, s *special) bool {
+// already exists unless force is set to true.)
+func addspecial(p unsafe.Pointer, s *special, force bool) bool {
 	span := spanOfHeap(uintptr(p))
 	if span == nil {
 		throw("addspecial on invalid pointer")
@@ -1874,9 +1898,9 @@ func addspecial(p unsafe.Pointer, s *special) bool {
 
 	// Find splice point, check for existing record.
 	iter, exists := span.specialFindSplicePoint(offset, kind)
-	if !exists {
+	if !exists || force {
 		// Splice in record, fill in offset.
-		s.offset = uint16(offset)
+		s.offset = offset
 		s.next = *iter
 		*iter = s
 		spanHasSpecials(span)
@@ -1884,7 +1908,10 @@ func addspecial(p unsafe.Pointer, s *special) bool {
 
 	unlock(&span.speciallock)
 	releasem(mp)
-	return !exists // already exists
+	// We're converting p to a uintptr and looking it up, and we
+	// don't want it to die and get swept while we're doing so.
+	KeepAlive(p)
+	return !exists || force // already exists or addition was forced
 }
 
 // Removes the Special record of the given kind for the object p.
@@ -1968,7 +1995,7 @@ func addfinalizer(p unsafe.Pointer, f *funcval, nret uintptr, fint *_type, ot *p
 	s.nret = nret
 	s.fint = fint
 	s.ot = ot
-	if addspecial(p, &s.special) {
+	if addspecial(p, &s.special, false) {
 		// This is responsible for maintaining the same
 		// GC-related invariants as markrootSpans in any
 		// situation where it's possible that markrootSpans
@@ -2008,6 +2035,50 @@ func removefinalizer(p unsafe.Pointer) {
 	unlock(&mheap_.speciallock)
 }
 
+// The described object has a cleanup set for it.
+type specialCleanup struct {
+	_       sys.NotInHeap
+	special special
+	fn      *funcval
+	// Globally unique ID for the cleanup, obtained from mheap_.cleanupID.
+	id uint64
+}
+
+// addCleanup attaches a cleanup function to the object. Multiple
+// cleanups are allowed on an object, and even the same pointer.
+// A cleanup id is returned which can be used to uniquely identify
+// the cleanup.
+func addCleanup(p unsafe.Pointer, f *funcval) uint64 {
+	lock(&mheap_.speciallock)
+	s := (*specialCleanup)(mheap_.specialCleanupAlloc.alloc())
+	mheap_.cleanupID++
+	id := mheap_.cleanupID
+	unlock(&mheap_.speciallock)
+	s.special.kind = _KindSpecialCleanup
+	s.fn = f
+	s.id = id
+
+	mp := acquirem()
+	addspecial(p, &s.special, true)
+	// This is responsible for maintaining the same
+	// GC-related invariants as markrootSpans in any
+	// situation where it's possible that markrootSpans
+	// has already run but mark termination hasn't yet.
+	if gcphase != _GCoff {
+		gcw := &mp.p.ptr().gcw
+		// Mark the cleanup itself, since the
+		// special isn't part of the GC'd heap.
+		scanblock(uintptr(unsafe.Pointer(&s.fn)), goarch.PtrSize, &oneptrmask[0], gcw, nil)
+	}
+	releasem(mp)
+	// Keep f alive. There's a window in this function where it's
+	// only reachable via the special while the special hasn't been
+	// added to the specials list yet. This is similar to a bug
+	// discovered for weak handles, see #70455.
+	KeepAlive(f)
+	return id
+}
+
 // The described object has a weak pointer.
 //
 // Weak pointers in the GC have the following invariants:
@@ -2040,17 +2111,28 @@ type specialWeakHandle struct {
 	handle *atomic.Uintptr
 }
 
-//go:linkname internal_weak_runtime_registerWeakPointer internal/weak.runtime_registerWeakPointer
+//go:linkname internal_weak_runtime_registerWeakPointer weak.runtime_registerWeakPointer
 func internal_weak_runtime_registerWeakPointer(p unsafe.Pointer) unsafe.Pointer {
 	return unsafe.Pointer(getOrAddWeakHandle(unsafe.Pointer(p)))
 }
 
-//go:linkname internal_weak_runtime_makeStrongFromWeak internal/weak.runtime_makeStrongFromWeak
+//go:linkname internal_weak_runtime_makeStrongFromWeak weak.runtime_makeStrongFromWeak
 func internal_weak_runtime_makeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 	handle := (*atomic.Uintptr)(u)
 
-	// Prevent preemption. We want to make sure that another GC cycle can't start.
+	// Prevent preemption. We want to make sure that another GC cycle can't start
+	// and that work.strongFromWeak.block can't change out from under us.
 	mp := acquirem()
+
+	// Yield to the GC if necessary.
+	if work.strongFromWeak.block {
+		releasem(mp)
+
+		// Try to park and wait for mark termination.
+		// N.B. gcParkStrongFromWeak calls acquirem before returning.
+		mp = gcParkStrongFromWeak()
+	}
+
 	p := handle.Load()
 	if p == 0 {
 		releasem(mp)
@@ -2061,7 +2143,15 @@ func internal_weak_runtime_makeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 	// even if it's just some random span.
 	span := spanOfHeap(p)
 	if span == nil {
-		// The span probably got swept and released.
+		// If it's immortal, then just return the pointer.
+		//
+		// Stay non-preemptible so the GC can't see us convert this potentially
+		// completely bogus value to an unsafe.Pointer.
+		if isGoPointerWithoutSpan(unsafe.Pointer(p)) {
+			releasem(mp)
+			return unsafe.Pointer(p)
+		}
+		// It's heap-allocated, so the span probably just got swept and released.
 		releasem(mp)
 		return nil
 	}
@@ -2092,6 +2182,41 @@ func internal_weak_runtime_makeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 	return ptr
 }
 
+// gcParkStrongFromWeak puts the current goroutine on the weak->strong queue and parks.
+func gcParkStrongFromWeak() *m {
+	// Prevent preemption as we check strongFromWeak, so it can't change out from under us.
+	mp := acquirem()
+
+	for work.strongFromWeak.block {
+		lock(&work.strongFromWeak.lock)
+		releasem(mp) // N.B. Holding the lock prevents preemption.
+
+		// Queue ourselves up.
+		work.strongFromWeak.q.pushBack(getg())
+
+		// Park.
+		goparkunlock(&work.strongFromWeak.lock, waitReasonGCWeakToStrongWait, traceBlockGCWeakToStrongWait, 2)
+
+		// Re-acquire the current M since we're going to check the condition again.
+		mp = acquirem()
+
+		// Re-check condition. We may have awoken in the next GC's mark termination phase.
+	}
+	return mp
+}
+
+// gcWakeAllStrongFromWeak wakes all currently blocked weak->strong
+// conversions. This is used at the end of a GC cycle.
+//
+// work.strongFromWeak.block must be false to prevent woken goroutines
+// from immediately going back to sleep.
+func gcWakeAllStrongFromWeak() {
+	lock(&work.strongFromWeak.lock)
+	list := work.strongFromWeak.q.popList()
+	injectglist(&list)
+	unlock(&work.strongFromWeak.lock)
+}
+
 // Retrieves or creates a weak pointer handle for the object p.
 func getOrAddWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 	// First try to retrieve without allocating.
@@ -2110,7 +2235,7 @@ func getOrAddWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 	s.special.kind = _KindSpecialWeakHandle
 	s.handle = handle
 	handle.Store(uintptr(p))
-	if addspecial(p, &s.special) {
+	if addspecial(p, &s.special, false) {
 		// This is responsible for maintaining the same
 		// GC-related invariants as markrootSpans in any
 		// situation where it's possible that markrootSpans
@@ -2126,8 +2251,14 @@ func getOrAddWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 
 		// Keep p alive for the duration of the function to ensure
 		// that it cannot die while we're trying to do this.
+		//
+		// Same for handle, which is only stored in the special.
+		// There's a window where it might die if we don't keep it
+		// alive explicitly. Returning it here is probably good enough,
+		// but let's be defensive and explicit. See #70455.
 		KeepAlive(p)
-		return s.handle
+		KeepAlive(handle)
+		return handle
 	}
 
 	// There was an existing handle. Free the special
@@ -2147,13 +2278,19 @@ func getOrAddWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 
 	// Keep p alive for the duration of the function to ensure
 	// that it cannot die while we're trying to do this.
+	//
+	// Same for handle, just to be defensive.
 	KeepAlive(p)
+	KeepAlive(handle)
 	return handle
 }
 
 func getWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 	span := spanOfHeap(uintptr(p))
 	if span == nil {
+		if isGoPointerWithoutSpan(p) {
+			return mheap_.immortalWeakHandles.getOrAdd(uintptr(p))
+		}
 		throw("getWeakHandle on invalid pointer")
 	}
 
@@ -2182,6 +2319,80 @@ func getWeakHandle(p unsafe.Pointer) *atomic.Uintptr {
 	return handle
 }
 
+type immortalWeakHandleMap struct {
+	root atomic.UnsafePointer // *immortalWeakHandle (can't use generics because it's notinheap)
+}
+
+// immortalWeakHandle is a lock-free append-only hash-trie.
+//
+// Key features:
+//   - 2-ary trie. Child nodes are indexed by the highest bit (remaining) of the hash of the address.
+//   - New nodes are placed at the first empty level encountered.
+//   - When the first child is added to a node, the existing value is not moved into a child.
+//     This means that we must check the value at each level, not just at the leaf.
+//   - No deletion or rebalancing.
+//   - Intentionally devolves into a linked list on hash collisions (the hash bits will all
+//     get shifted out during iteration, and new nodes will just be appended to the 0th child).
+type immortalWeakHandle struct {
+	_ sys.NotInHeap
+
+	children [2]atomic.UnsafePointer // *immortalObjectMapNode (can't use generics because it's notinheap)
+	ptr      uintptr                 // &ptr is the weak handle
+}
+
+// handle returns a canonical weak handle.
+func (h *immortalWeakHandle) handle() *atomic.Uintptr {
+	// N.B. Since we just need an *atomic.Uintptr that never changes, we can trivially
+	// reference ptr to save on some memory in immortalWeakHandle and avoid extra atomics
+	// in getOrAdd.
+	return (*atomic.Uintptr)(unsafe.Pointer(&h.ptr))
+}
+
+// getOrAdd introduces p, which must be a pointer to immortal memory (for example, a linker-allocated
+// object) and returns a weak handle. The weak handle will never become nil.
+func (tab *immortalWeakHandleMap) getOrAdd(p uintptr) *atomic.Uintptr {
+	var newNode *immortalWeakHandle
+	m := &tab.root
+	hash := memhash(abi.NoEscape(unsafe.Pointer(&p)), 0, goarch.PtrSize)
+	hashIter := hash
+	for {
+		n := (*immortalWeakHandle)(m.Load())
+		if n == nil {
+			// Try to insert a new map node. We may end up discarding
+			// this node if we fail to insert because it turns out the
+			// value is already in the map.
+			//
+			// The discard will only happen if two threads race on inserting
+			// the same value. Both might create nodes, but only one will
+			// succeed on insertion. If two threads race to insert two
+			// different values, then both nodes will *always* get inserted,
+			// because the equality checking below will always fail.
+			//
+			// Performance note: contention on insertion is likely to be
+			// higher for small maps, but since this data structure is
+			// append-only, either the map stays small because there isn't
+			// much activity, or the map gets big and races to insert on
+			// the same node are much less likely.
+			if newNode == nil {
+				newNode = (*immortalWeakHandle)(persistentalloc(unsafe.Sizeof(immortalWeakHandle{}), goarch.PtrSize, &memstats.gcMiscSys))
+				newNode.ptr = p
+			}
+			if m.CompareAndSwapNoWB(nil, unsafe.Pointer(newNode)) {
+				return newNode.handle()
+			}
+			// Reload n. Because pointers are only stored once,
+			// we must have lost the race, and therefore n is not nil
+			// anymore.
+			n = (*immortalWeakHandle)(m.Load())
+		}
+		if n.ptr == p {
+			return n.handle()
+		}
+		m = &n.children[hashIter>>(8*goarch.PtrSize-1)]
+		hashIter <<= 1
+	}
+}
+
 // The described object is being heap profiled.
 type specialprofile struct {
 	_       sys.NotInHeap
@@ -2196,7 +2407,7 @@ func setprofilebucket(p unsafe.Pointer, b *bucket) {
 	unlock(&mheap_.speciallock)
 	s.special.kind = _KindSpecialProfile
 	s.b = b
-	if !addspecial(p, &s.special) {
+	if !addspecial(p, &s.special, false) {
 		throw("setprofilebucket: profile already set")
 	}
 }
@@ -2272,6 +2483,15 @@ func freeSpecial(s *special, p unsafe.Pointer, size uintptr) {
 	case _KindSpecialPinCounter:
 		lock(&mheap_.speciallock)
 		mheap_.specialPinCounterAlloc.free(unsafe.Pointer(s))
+		unlock(&mheap_.speciallock)
+	case _KindSpecialCleanup:
+		sc := (*specialCleanup)(unsafe.Pointer(s))
+		// Cleanups, unlike finalizers, do not resurrect the objects
+		// they're attached to, so we only need to pass the cleanup
+		// function, not the object.
+		queuefinalizer(nil, sc.fn, 0, nil, nil)
+		lock(&mheap_.speciallock)
+		mheap_.specialCleanupAlloc.free(unsafe.Pointer(sc))
 		unlock(&mheap_.speciallock)
 	default:
 		throw("bad special kind")
@@ -2438,7 +2658,7 @@ func newArenaMayUnlock() *gcBitsArena {
 	var result *gcBitsArena
 	if gcBitsArenas.free == nil {
 		unlock(&gcBitsArenas.lock)
-		result = (*gcBitsArena)(sysAlloc(gcBitsChunkBytes, &memstats.gcMiscSys))
+		result = (*gcBitsArena)(sysAlloc(gcBitsChunkBytes, &memstats.gcMiscSys, "gc bits"))
 		if result == nil {
 			throw("runtime: cannot allocate memory")
 		}

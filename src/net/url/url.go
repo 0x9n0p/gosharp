@@ -3,12 +3,14 @@
 // license that can be found in the LICENSE file.
 
 // Package url parses URLs and implements query escaping.
+//
+// See RFC 3986. This package generally follows RFC 3986, except where
+// it deviates for compatibility reasons.
+// RFC 6874 followed for IPv6 zone literals.
 package url
 
-// See RFC 3986. This package generally follows RFC 3986, except where
-// it deviates for compatibility reasons. When sending changes, first
-// search old issues for history on decisions. Unit tests should also
-// contain references to issue numbers with details.
+// When sending changes, first  search old issues for history on decisions.
+// Unit tests should also contain references to issue numbers with details.
 
 import (
 	"errors"
@@ -67,8 +69,9 @@ func unhex(c byte) byte {
 		return c - 'a' + 10
 	case 'A' <= c && c <= 'F':
 		return c - 'A' + 10
+	default:
+		panic("invalid hex character")
 	}
-	return 0
 }
 
 type encoding int

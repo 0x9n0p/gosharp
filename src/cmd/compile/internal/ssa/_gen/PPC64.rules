@@ -113,6 +113,7 @@
 // Fold transfer of CA -> GPR -> CA. Note 2 uses when feeding into a chained Add64carry.
 (Select1 (ADDCconst n:(ADDZEzero x) [-1])) && n.Uses <= 2 => x
 (ADDE (MOVDconst [0]) y c) => (ADDZE y c)
+(ADDC x (MOVDconst [y])) && is16Bit(y) => (ADDCconst [y] x)
 
 // Borrowing subtraction.
 (Select0 (Sub64borrow x y c)) =>                 (Select0 <typ.UInt64> (SUBE x y (Select1 <typ.UInt64> (SUBCconst c [0]))))
@@ -150,13 +151,18 @@
 
 (ANDconst [m] (SRWconst x [s])) && mergePPC64RShiftMask(m,s,32) == 0 => (MOVDconst [0])
 (ANDconst [m] (SRWconst x [s])) && mergePPC64AndSrwi(m,s) != 0 => (RLWINM [mergePPC64AndSrwi(m,s)] x)
+(ANDconst [m] (SRDconst x [s])) && mergePPC64AndSrdi(m,s) != 0 => (RLWINM [mergePPC64AndSrdi(m,s)] x)
 (AND (MOVDconst [m]) (SRWconst x [s])) && mergePPC64RShiftMask(m,s,32) == 0 => (MOVDconst [0])
 (AND (MOVDconst [m]) (SRWconst x [s])) && mergePPC64AndSrwi(m,s) != 0 => (RLWINM [mergePPC64AndSrwi(m,s)] x)
+(AND (MOVDconst [m]) (SRDconst x [s])) && mergePPC64AndSrdi(m,s) != 0 => (RLWINM [mergePPC64AndSrdi(m,s)] x)
 
 (SRWconst (ANDconst [m] x) [s]) && mergePPC64RShiftMask(m>>uint(s),s,32) == 0 => (MOVDconst [0])
 (SRWconst (ANDconst [m] x) [s]) && mergePPC64AndSrwi(m>>uint(s),s) != 0 => (RLWINM [mergePPC64AndSrwi(m>>uint(s),s)] x)
 (SRWconst (AND (MOVDconst [m]) x) [s]) && mergePPC64RShiftMask(m>>uint(s),s,32) == 0 => (MOVDconst [0])
 (SRWconst (AND (MOVDconst [m]) x) [s]) && mergePPC64AndSrwi(m>>uint(s),s) != 0 => (RLWINM [mergePPC64AndSrwi(m>>uint(s),s)] x)
+
+(ANDconst [m] (SLDconst x [s])) && mergePPC64AndSldi(m,s) != 0 => (RLWINM [mergePPC64AndSldi(m,s)] x)
+(AND (MOVDconst [m]) (SLDconst x [s])) && mergePPC64AndSldi(m,s) != 0 => (RLWINM [mergePPC64AndSldi(m,s)] x)
 
 // Merge shift right + shift left and clear left (e.g for a table lookup)
 (CLRLSLDI [c] (SRWconst [s] x)) && mergePPC64ClrlsldiSrw(int64(c),s) != 0 => (RLWINM [mergePPC64ClrlsldiSrw(int64(c),s)] x)
@@ -248,19 +254,21 @@
 (MOVDaddr {sym} [n] p:(ADD x y)) && sym == nil && n == 0 => p
 (MOVDaddr {sym} [n] ptr) && sym == nil && n == 0 && (ptr.Op == OpArgIntReg || ptr.Op == OpPhi) => ptr
 
-// TODO: optimize these cases?
-(Ctz32NonZero ...) => (Ctz32 ...)
-(Ctz64NonZero ...) => (Ctz64 ...)
+(Ctz(64|32|16|8)NonZero ...) => (Ctz64 ...)
 
-(Ctz64 x) && buildcfg.GOPPC64<=8 => (POPCNTD (ANDN <typ.Int64> (ADDconst <typ.Int64> [-1] x) x))
-(Ctz64 x) => (CNTTZD x)
-(Ctz32 x) && buildcfg.GOPPC64<=8 => (POPCNTW (MOVWZreg (ANDN <typ.Int> (ADDconst <typ.Int> [-1] x) x)))
-(Ctz32 x) => (CNTTZW (MOVWZreg x))
-(Ctz16 x) => (POPCNTW (MOVHZreg (ANDN <typ.Int16> (ADDconst <typ.Int16> [-1] x) x)))
-(Ctz8 x)  => (POPCNTB (MOVBZreg (ANDN <typ.UInt8> (ADDconst <typ.UInt8> [-1] x) x)))
+(Ctz64 x) && buildcfg.GOPPC64 <= 8 => (POPCNTD (ANDN <typ.Int64> (ADDconst <typ.Int64> [-1] x) x))
+(Ctz32 x) && buildcfg.GOPPC64 <= 8 => (POPCNTW (MOVWZreg (ANDN <typ.Int> (ADDconst <typ.Int> [-1] x) x)))
+(Ctz16 x) && buildcfg.GOPPC64 <= 8 => (POPCNTW (MOVHZreg (ANDN <typ.Int16> (ADDconst <typ.Int16> [-1] x) x)))
+(Ctz8  x) && buildcfg.GOPPC64 <= 8 => (POPCNTB (MOVBZreg (ANDN <typ.UInt8> (ADDconst <typ.UInt8> [-1] x) x)))
+
+(Ctz64 x) && buildcfg.GOPPC64 >= 9 => (CNTTZD x)
+(Ctz32 x) && buildcfg.GOPPC64 >= 9 => (CNTTZW (MOVWZreg x))
+(Ctz16 x) && buildcfg.GOPPC64 >= 9 => (CNTTZD (OR <typ.UInt64> x (MOVDconst [1<<16])))
+(Ctz8  x) && buildcfg.GOPPC64 >= 9 => (CNTTZD (OR <typ.UInt64> x (MOVDconst [1<<8])))
 
 (BitLen64 x) => (SUBFCconst [64] (CNTLZD <typ.Int> x))
 (BitLen32 x) => (SUBFCconst [32] (CNTLZW <typ.Int> x))
+(BitLen(16|8) x) => (BitLen64 (ZeroExt(16|8)to64 x))
 
 (PopCount64 ...) => (POPCNTD ...)
 (PopCount(32|16|8) x) => (POPCNT(W|W|B) (MOV(W|H|B)Zreg x))

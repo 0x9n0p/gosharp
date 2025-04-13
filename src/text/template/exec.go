@@ -333,7 +333,7 @@ func isTrue(val reflect.Value) (truth, ok bool) {
 		truth = val.Bool()
 	case reflect.Complex64, reflect.Complex128:
 		truth = val.Complex() != 0
-	case reflect.Chan, reflect.Func, reflect.Pointer, reflect.Interface:
+	case reflect.Chan, reflect.Func, reflect.Pointer, reflect.UnsafePointer, reflect.Interface:
 		truth = !val.IsNil()
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		truth = val.Int() != 0
@@ -810,7 +810,7 @@ func (s *state) evalCall(dot, fun reflect.Value, isBuiltin bool, node parse.Node
 				return v
 			}
 		}
-		if final != missingVal {
+		if !final.Equal(missingVal) {
 			// The last argument to and/or is coming from
 			// the pipeline. We didn't short circuit on an earlier
 			// argument, so we are going to return this one.
@@ -856,7 +856,13 @@ func (s *state) evalCall(dot, fun reflect.Value, isBuiltin bool, node parse.Node
 	// Special case for the "call" builtin.
 	// Insert the name of the callee function as the first argument.
 	if isBuiltin && name == "call" {
-		calleeName := args[0].String()
+		var calleeName string
+		if len(args) == 0 {
+			// final must be present or we would have errored out above.
+			calleeName = final.String()
+		} else {
+			calleeName = args[0].String()
+		}
 		argv = append([]reflect.Value{reflect.ValueOf(calleeName)}, argv...)
 		fun = reflect.ValueOf(call)
 	}

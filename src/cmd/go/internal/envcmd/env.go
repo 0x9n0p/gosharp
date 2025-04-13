@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -78,11 +79,14 @@ var (
 func MkEnv() []cfg.EnvVar {
 	envFile, envFileChanged, _ := cfg.EnvFile()
 	env := []cfg.EnvVar{
+		// NOTE: Keep this list (and in general, all lists in source code) sorted by name.
 		{Name: "GO111MODULE", Value: cfg.Getenv("GO111MODULE")},
 		{Name: "GOARCH", Value: cfg.Goarch, Changed: cfg.Goarch != runtime.GOARCH},
 		{Name: "GOAUTH", Value: cfg.GOAUTH, Changed: cfg.GOAUTHChanged},
 		{Name: "GOBIN", Value: cfg.GOBIN},
 		{Name: "GOCACHE"},
+		{Name: "GOCACHEPROG", Value: cfg.GOCACHEPROG, Changed: cfg.GOCACHEPROGChanged},
+		{Name: "GODEBUG", Value: os.Getenv("GODEBUG")},
 		{Name: "GOENV", Value: envFile, Changed: envFileChanged},
 		{Name: "GOEXE", Value: cfg.ExeSuffix},
 
@@ -93,6 +97,7 @@ func MkEnv() []cfg.EnvVar {
 		// a different version (for example, when bisecting a regression).
 		{Name: "GOEXPERIMENT", Value: cfg.RawGOEXPERIMENT},
 
+		{Name: "GOFIPS140", Value: cfg.GOFIPS140, Changed: cfg.GOFIPS140Changed},
 		{Name: "GOFLAGS", Value: cfg.Getenv("GOFLAGS")},
 		{Name: "GOHOSTARCH", Value: runtime.GOARCH},
 		{Name: "GOHOSTOS", Value: runtime.GOOS},
@@ -106,14 +111,13 @@ func MkEnv() []cfg.EnvVar {
 		{Name: "GOPROXY", Value: cfg.GOPROXY, Changed: cfg.GOPROXYChanged},
 		{Name: "GOROOT", Value: cfg.GOROOT},
 		{Name: "GOSUMDB", Value: cfg.GOSUMDB, Changed: cfg.GOSUMDBChanged},
+		{Name: "GOTELEMETRY", Value: telemetry.Mode()},
+		{Name: "GOTELEMETRYDIR", Value: telemetry.Dir()},
 		{Name: "GOTMPDIR", Value: cfg.Getenv("GOTMPDIR")},
 		{Name: "GOTOOLCHAIN"},
 		{Name: "GOTOOLDIR", Value: build.ToolDir},
 		{Name: "GOVCS", Value: cfg.GOVCS},
 		{Name: "GOVERSION", Value: runtime.Version()},
-		{Name: "GODEBUG", Value: os.Getenv("GODEBUG")},
-		{Name: "GOTELEMETRY", Value: telemetry.Mode()},
-		{Name: "GOTELEMETRYDIR", Value: telemetry.Dir()},
 	}
 
 	for i := range env {
@@ -127,7 +131,7 @@ func MkEnv() []cfg.EnvVar {
 				env[i].Changed = true
 			}
 		case "GOCACHE":
-			env[i].Value, env[i].Changed = cache.DefaultDir()
+			env[i].Value, env[i].Changed, _ = cache.DefaultDir()
 		case "GOTOOLCHAIN":
 			env[i].Value, env[i].Changed = cfg.EnvOrAndChanged("GOTOOLCHAIN", "")
 		case "GODEBUG":
@@ -250,7 +254,7 @@ func ExtraEnvVarsCostly() []cfg.EnvVar {
 			ev.Changed = ev.Value != ""
 		case "PKG_CONFIG":
 			ev.Changed = ev.Value != cfg.DefaultPkgConfig
-		case "CGO_CXXFLAGS", "CGO_CFLAGS", "CGO_FFLAGS", "GGO_LDFLAGS":
+		case "CGO_CXXFLAGS", "CGO_CFLAGS", "CGO_FFLAGS", "CGO_LDFLAGS":
 			ev.Changed = ev.Value != work.DefaultCFlags
 		}
 	}
@@ -304,7 +308,7 @@ func runEnv(ctx context.Context, cmd *base.Command, args []string) {
 	env := cfg.CmdEnv
 	env = append(env, ExtraEnvVars()...)
 
-	if err := fsys.Init(base.Cwd()); err != nil {
+	if err := fsys.Init(); err != nil {
 		base.Fatal(err)
 	}
 
@@ -480,6 +484,9 @@ func checkBuildConfig(add map[string]string, del map[string]bool) error {
 
 // PrintEnv prints the environment variables to w.
 func PrintEnv(w io.Writer, env []cfg.EnvVar, onlyChanged bool) {
+	env = slices.Clone(env)
+	slices.SortFunc(env, func(x, y cfg.EnvVar) int { return strings.Compare(x.Name, y.Name) })
+
 	for _, e := range env {
 		if e.Name != "TERM" {
 			if runtime.GOOS != "plan9" && bytes.Contains([]byte(e.Value), []byte{0}) {
@@ -515,51 +522,56 @@ func PrintEnv(w io.Writer, env []cfg.EnvVar, onlyChanged bool) {
 	}
 }
 
-func hasNonGraphic(s string) bool {
-	for _, c := range []byte(s) {
-		if c == '\r' || c == '\n' || (!unicode.IsGraphic(rune(c)) && !unicode.IsSpace(rune(c))) {
-			return true
-		}
+// isWindowsUnquotableRune reports whether r can't be quoted in a
+// Windows "set" command.
+// These runes will be replaced by the Unicode replacement character.
+func isWindowsUnquotableRune(r rune) bool {
+	if r == '\r' || r == '\n' {
+		return true
 	}
-	return false
+	return !unicode.IsGraphic(r) && !unicode.IsSpace(r)
+}
+
+func hasNonGraphic(s string) bool {
+	return strings.ContainsFunc(s, isWindowsUnquotableRune)
 }
 
 func shellQuote(s string) string {
-	var b bytes.Buffer
-	b.WriteByte('\'')
-	for _, x := range []byte(s) {
-		if x == '\'' {
+	var sb strings.Builder
+	sb.WriteByte('\'')
+	for _, r := range s {
+		if r == '\'' {
 			// Close the single quoted string, add an escaped single quote,
 			// and start another single quoted string.
-			b.WriteString(`'\''`)
+			sb.WriteString(`'\''`)
 		} else {
-			b.WriteByte(x)
+			sb.WriteRune(r)
 		}
 	}
-	b.WriteByte('\'')
-	return b.String()
+	sb.WriteByte('\'')
+	return sb.String()
 }
 
 func batchEscape(s string) string {
-	var b bytes.Buffer
-	for _, x := range []byte(s) {
-		if x == '\r' || x == '\n' || (!unicode.IsGraphic(rune(x)) && !unicode.IsSpace(rune(x))) {
-			b.WriteRune(unicode.ReplacementChar)
+	var sb strings.Builder
+	for _, r := range s {
+		if isWindowsUnquotableRune(r) {
+			sb.WriteRune(unicode.ReplacementChar)
 			continue
 		}
-		switch x {
+		switch r {
 		case '%':
-			b.WriteString("%%")
+			sb.WriteString("%%")
 		case '<', '>', '|', '&', '^':
 			// These are special characters that need to be escaped with ^. See
 			// https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/set_1.
-			b.WriteByte('^')
-			b.WriteByte(x)
+			sb.WriteByte('^')
+			sb.WriteRune(r)
 		default:
-			b.WriteByte(x)
+			sb.WriteRune(r)
 		}
 	}
-	return b.String()
+	return sb.String()
 }
 
 func printEnvAsJSON(env []cfg.EnvVar, onlyChanged bool) {

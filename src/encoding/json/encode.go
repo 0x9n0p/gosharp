@@ -72,8 +72,8 @@ import (
 //
 // The "omitempty" option specifies that the field should be omitted
 // from the encoding if the field has an empty value, defined as
-// false, 0, a nil pointer, a nil interface value, and any empty array,
-// slice, map, or string.
+// false, 0, a nil pointer, a nil interface value, and any array,
+// slice, map, or string of length zero.
 //
 // As a special case, if the field tag is "-", the field is always omitted.
 // Note that a field with name "-" can still be generated using the tag "-,".
@@ -1015,10 +1015,7 @@ func appendString[Bytes []byte | string](dst []byte, src Bytes, escapeHTML bool)
 		// For now, cast only a small portion of byte slices to a string
 		// so that it can be stack allocated. This slows down []byte slightly
 		// due to the extra copy, but keeps string performance roughly the same.
-		n := len(src) - i
-		if n > utf8.UTFMax {
-			n = utf8.UTFMax
-		}
+		n := min(len(src)-i, utf8.UTFMax)
 		c, size := utf8.DecodeRuneInString(string(src[i : i+n]))
 		if c == utf8.RuneError && size == 1 {
 			dst = append(dst, src[start:i]...)

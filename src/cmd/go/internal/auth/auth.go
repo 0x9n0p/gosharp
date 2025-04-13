@@ -8,8 +8,11 @@ package auth
 import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/cfg"
+	"fmt"
+	"log"
 	"net/http"
-	"path"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -24,84 +27,153 @@ var (
 // as specified by the GOAUTH environment variable.
 // It returns whether any matching credentials were found.
 // req must use HTTPS or this function will panic.
-func AddCredentials(req *http.Request) bool {
+// res is used for the custom GOAUTH command's stdin.
+func AddCredentials(client *http.Client, req *http.Request, res *http.Response, url string) bool {
 	if req.URL.Scheme != "https" {
 		panic("GOAUTH called without https")
 	}
 	if cfg.GOAUTH == "off" {
 		return false
 	}
-	authOnce.Do(runGoAuth)
-	currentPrefix := strings.TrimPrefix(req.URL.String(), "https://")
-	// Iteratively try prefixes, moving up the path hierarchy.
-	for currentPrefix != "/" && currentPrefix != "." && currentPrefix != "" {
-		if loadCredential(req, currentPrefix) {
-			return true
-		}
-
-		// Move to the parent directory.
-		currentPrefix = path.Dir(currentPrefix)
+	// Run all GOAUTH commands at least once.
+	authOnce.Do(func() {
+		runGoAuth(client, res, "")
+	})
+	if url != "" {
+		// First fetch must have failed; re-invoke GOAUTH commands with url.
+		runGoAuth(client, res, url)
 	}
-	return false
+	return loadCredential(req, req.URL.String())
 }
 
 // runGoAuth executes authentication commands specified by the GOAUTH
 // environment variable handling 'off', 'netrc', and 'git' methods specially,
 // and storing retrieved credentials for future access.
-func runGoAuth() {
+func runGoAuth(client *http.Client, res *http.Response, url string) {
+	var cmdErrs []error // store GOAUTH command errors to log later.
+	goAuthCmds := strings.Split(cfg.GOAUTH, ";")
 	// The GOAUTH commands are processed in reverse order to prioritize
 	// credentials in the order they were specified.
-	goAuthCmds := strings.Split(cfg.GOAUTH, ";")
 	slices.Reverse(goAuthCmds)
-	for _, cmdStr := range goAuthCmds {
-		cmdStr = strings.TrimSpace(cmdStr)
-		switch {
-		case cmdStr == "off":
+	for _, command := range goAuthCmds {
+		command = strings.TrimSpace(command)
+		words := strings.Fields(command)
+		if len(words) == 0 {
+			base.Fatalf("go: GOAUTH encountered an empty command (GOAUTH=%s)", cfg.GOAUTH)
+		}
+		switch words[0] {
+		case "off":
 			if len(goAuthCmds) != 1 {
-				base.Fatalf("GOAUTH=off cannot be combined with other authentication commands (GOAUTH=%s)", cfg.GOAUTH)
+				base.Fatalf("go: GOAUTH=off cannot be combined with other authentication commands (GOAUTH=%s)", cfg.GOAUTH)
 			}
 			return
-		case cmdStr == "netrc":
+		case "netrc":
 			lines, err := readNetrc()
 			if err != nil {
-				base.Fatalf("could not parse netrc (GOAUTH=%s): %v", cfg.GOAUTH, err)
+				cmdErrs = append(cmdErrs, fmt.Errorf("GOAUTH=%s: %v", command, err))
+				continue
 			}
-			for _, l := range lines {
+			// Process lines in reverse so that if the same machine is listed
+			// multiple times, we end up saving the earlier one
+			// (overwriting later ones). This matches the way the go command
+			// worked before GOAUTH.
+			for i := len(lines) - 1; i >= 0; i-- {
+				l := lines[i]
 				r := http.Request{Header: make(http.Header)}
 				r.SetBasicAuth(l.login, l.password)
-				storeCredential([]string{l.machine}, r.Header)
+				storeCredential(l.machine, r.Header)
 			}
-		case strings.HasPrefix(cmdStr, "git"):
-			base.Fatalf("unimplemented: %s", cmdStr)
+		case "git":
+			if len(words) != 2 {
+				base.Fatalf("go: GOAUTH=git dir method requires an absolute path to the git working directory")
+			}
+			dir := words[1]
+			if !filepath.IsAbs(dir) {
+				base.Fatalf("go: GOAUTH=git dir method requires an absolute path to the git working directory, dir is not absolute")
+			}
+			fs, err := os.Stat(dir)
+			if err != nil {
+				base.Fatalf("go: GOAUTH=git encountered an error; cannot stat %s: %v", dir, err)
+			}
+			if !fs.IsDir() {
+				base.Fatalf("go: GOAUTH=git dir method requires an absolute path to the git working directory, dir is not a directory")
+			}
+
+			if url == "" {
+				// Skip the initial GOAUTH run since we need to provide an
+				// explicit url to runGitAuth.
+				continue
+			}
+			prefix, header, err := runGitAuth(client, dir, url)
+			if err != nil {
+				// Save the error, but don't print it yet in case another
+				// GOAUTH command might succeed.
+				cmdErrs = append(cmdErrs, fmt.Errorf("GOAUTH=%s: %v", command, err))
+			} else {
+				storeCredential(prefix, header)
+			}
 		default:
-			base.Fatalf("unimplemented: %s", cmdStr)
+			credentials, err := runAuthCommand(command, url, res)
+			if err != nil {
+				// Save the error, but don't print it yet in case another
+				// GOAUTH command might succeed.
+				cmdErrs = append(cmdErrs, fmt.Errorf("GOAUTH=%s: %v", command, err))
+				continue
+			}
+			for prefix := range credentials {
+				storeCredential(prefix, credentials[prefix])
+			}
+		}
+	}
+	// If no GOAUTH command provided a credential for the given url
+	// and an error occurred, log the error.
+	if cfg.BuildX && url != "" {
+		req := &http.Request{Header: make(http.Header)}
+		if ok := loadCredential(req, url); !ok && len(cmdErrs) > 0 {
+			log.Printf("GOAUTH encountered errors for %s:", url)
+			for _, err := range cmdErrs {
+				log.Printf("  %v", err)
+			}
 		}
 	}
 }
 
-// loadCredential retrieves cached credentials for the given url prefix and adds
+// loadCredential retrieves cached credentials for the given url and adds
 // them to the request headers.
-func loadCredential(req *http.Request, prefix string) bool {
-	headers, ok := credentialCache.Load(prefix)
-	if !ok {
-		return false
-	}
-	for key, values := range headers.(http.Header) {
-		for _, value := range values {
-			req.Header.Add(key, value)
+func loadCredential(req *http.Request, url string) bool {
+	currentPrefix := strings.TrimPrefix(url, "https://")
+	currentPrefix = strings.TrimSuffix(currentPrefix, "/")
+
+	// Iteratively try prefixes, moving up the path hierarchy.
+	// E.g. example.com/foo/bar, example.com/foo, example.com
+	for {
+		headers, ok := credentialCache.Load(currentPrefix)
+		if !ok {
+			lastSlash := strings.LastIndexByte(currentPrefix, '/')
+			if lastSlash == -1 {
+				return false
+			}
+			currentPrefix = currentPrefix[:lastSlash]
+			continue
 		}
+		for key, values := range headers.(http.Header) {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+		return true
 	}
-	return true
 }
 
 // storeCredential caches or removes credentials (represented by HTTP headers)
 // associated with given URL prefixes.
-func storeCredential(prefixes []string, header http.Header) {
-	for _, prefix := range prefixes {
-		if len(header) == 0 {
-			credentialCache.Delete(prefix)
-		} else {
-			credentialCache.Store(prefix, header)
-		}
+func storeCredential(prefix string, header http.Header) {
+	// Trim "https://" prefix to match the format used in .netrc files.
+	prefix = strings.TrimPrefix(prefix, "https://")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if len(header) == 0 {
+		credentialCache.Delete(prefix)
+	} else {
+		credentialCache.Store(prefix, header)
 	}
 }

@@ -49,7 +49,7 @@ const (
 	// desired maximum number of frames after expansion.
 	// This should be at least as large as the largest skip value
 	// used for profiling; otherwise stacks may be truncated inconsistently
-	maxSkip = 5
+	maxSkip = 6
 
 	// maxProfStackDepth is the highest valid value for debug.profstackdepth.
 	// It's used for the bucket.stk func.
@@ -279,7 +279,7 @@ func stkbucket(typ bucketType, size uintptr, stk []uintptr, alloc bool) *bucket 
 		// check again under the lock
 		bh = (*buckhashArray)(buckhash.Load())
 		if bh == nil {
-			bh = (*buckhashArray)(sysAlloc(unsafe.Sizeof(buckhashArray{}), &memstats.buckhash_sys))
+			bh = (*buckhashArray)(sysAlloc(unsafe.Sizeof(buckhashArray{}), &memstats.buckhash_sys, "profiler hash buckets"))
 			if bh == nil {
 				throw("runtime: cannot allocate memory")
 			}
@@ -444,7 +444,7 @@ func mProf_Malloc(mp *m, p unsafe.Pointer, size uintptr) {
 	}
 	// Only use the part of mp.profStack we need and ignore the extra space
 	// reserved for delayed inline expansion with frame pointer unwinding.
-	nstk := callers(4, mp.profStack[:debug.profstackdepth])
+	nstk := callers(5, mp.profStack[:debug.profstackdepth])
 	index := (mProfCycle.read() + 2) % uint32(len(memRecord{}.future))
 
 	b := stkbucket(memProfile, size, mp.profStack[:nstk], true)

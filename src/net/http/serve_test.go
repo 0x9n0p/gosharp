@@ -13,9 +13,11 @@ import (
 	"compress/zlib"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"internal/synctest"
 	"internal/testenv"
 	"io"
 	"log"
@@ -4301,19 +4303,6 @@ func TestResponseWriterWriteString(t *testing.T) {
 	}
 }
 
-func TestAppendTime(t *testing.T) {
-	var b [len(TimeFormat)]byte
-	t1 := time.Date(2013, 9, 21, 15, 41, 0, 0, time.FixedZone("CEST", 2*60*60))
-	res := ExportAppendTime(b[:0], t1)
-	t2, err := ParseTime(string(res))
-	if err != nil {
-		t.Fatalf("Error parsing time: %s", err)
-	}
-	if !t1.Equal(t2) {
-		t.Fatalf("Times differ; expected: %v, got %v (%s)", t1, t2, string(res))
-	}
-}
-
 func TestServerConnState(t *testing.T) { run(t, testServerConnState, []testMode{http1Mode}) }
 func testServerConnState(t *testing.T, mode testMode) {
 	handler := map[string]func(w ResponseWriter, r *Request){
@@ -5805,70 +5794,59 @@ func testServerShutdown(t *testing.T, mode testMode) {
 	}
 }
 
-func TestServerShutdownStateNew(t *testing.T) { run(t, testServerShutdownStateNew) }
-func testServerShutdownStateNew(t *testing.T, mode testMode) {
+func TestServerShutdownStateNew(t *testing.T) { runSynctest(t, testServerShutdownStateNew) }
+func testServerShutdownStateNew(t testing.TB, mode testMode) {
 	if testing.Short() {
 		t.Skip("test takes 5-6 seconds; skipping in short mode")
 	}
 
-	var connAccepted sync.WaitGroup
+	listener := fakeNetListen()
+	defer listener.Close()
+
 	ts := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
 		// nothing.
 	}), func(ts *httptest.Server) {
-		ts.Config.ConnState = func(conn net.Conn, state ConnState) {
-			if state == StateNew {
-				connAccepted.Done()
-			}
-		}
+		ts.Listener.Close()
+		ts.Listener = listener
+		// Ignore irrelevant error about TLS handshake failure.
+		ts.Config.ErrorLog = log.New(io.Discard, "", 0)
 	}).ts
 
 	// Start a connection but never write to it.
-	connAccepted.Add(1)
-	c, err := net.Dial("tcp", ts.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := listener.connect()
 	defer c.Close()
+	synctest.Wait()
 
-	// Wait for the connection to be accepted by the server. Otherwise, if
-	// Shutdown happens to run first, the server will be closed when
-	// encountering the connection, in which case it will be rejected
-	// immediately.
-	connAccepted.Wait()
-
-	shutdownRes := make(chan error, 1)
-	go func() {
-		shutdownRes <- ts.Config.Shutdown(context.Background())
-	}()
-	readRes := make(chan error, 1)
-	go func() {
-		_, err := c.Read([]byte{0})
-		readRes <- err
-	}()
+	shutdownRes := runAsync(func() (struct{}, error) {
+		return struct{}{}, ts.Config.Shutdown(context.Background())
+	})
 
 	// TODO(#59037): This timeout is hard-coded in closeIdleConnections.
 	// It is undocumented, and some users may find it surprising.
 	// Either document it, or switch to a less surprising behavior.
 	const expectTimeout = 5 * time.Second
 
-	t0 := time.Now()
-	select {
-	case got := <-shutdownRes:
-		d := time.Since(t0)
-		if got != nil {
-			t.Fatalf("shutdown error after %v: %v", d, err)
-		}
-		if d < expectTimeout/2 {
-			t.Errorf("shutdown too soon after %v", d)
-		}
-	case <-time.After(expectTimeout * 3 / 2):
-		t.Fatalf("timeout waiting for shutdown")
+	// Wait until just before the expected timeout.
+	time.Sleep(expectTimeout - 1)
+	synctest.Wait()
+	if shutdownRes.done() {
+		t.Fatal("shutdown too soon")
+	}
+	if c.IsClosedByPeer() {
+		t.Fatal("connection was closed by server too soon")
 	}
 
-	// Wait for c.Read to unblock; should be already done at this point,
-	// or within a few milliseconds.
-	if err := <-readRes; err == nil {
-		t.Error("expected error from Read")
+	// closeIdleConnections isn't precise about its actual shutdown time.
+	// Wait long enough for it to definitely have shut down.
+	//
+	// (It would be good to make closeIdleConnections less sloppy.)
+	time.Sleep(2 * time.Second)
+	synctest.Wait()
+	if _, err := shutdownRes.result(); err != nil {
+		t.Fatalf("Shutdown() = %v, want complete", err)
+	}
+	if !c.IsClosedByPeer() {
+		t.Fatalf("connection was not closed by server after shutdown")
 	}
 }
 
@@ -6152,6 +6130,50 @@ func testServerHijackGetsBackgroundByte(t *testing.T, mode testMode) {
 	}
 	<-inHandler
 	if _, err := cn.Write([]byte("foo")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
+// Test that the bufio.Reader returned by Hijack yields the entire body.
+func TestServerHijackGetsFullBody(t *testing.T) {
+	run(t, testServerHijackGetsFullBody, []testMode{http1Mode})
+}
+func testServerHijackGetsFullBody(t *testing.T, mode testMode) {
+	if runtime.GOOS == "plan9" {
+		t.Skip("skipping test; see https://golang.org/issue/18657")
+	}
+	done := make(chan struct{})
+	needle := strings.Repeat("x", 100*1024) // assume: larger than net/http bufio size
+	ts := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+		defer close(done)
+
+		conn, buf, err := w.(Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+
+		got := make([]byte, len(needle))
+		n, err := io.ReadFull(buf.Reader, got)
+		if n != len(needle) || string(got) != needle || err != nil {
+			t.Errorf("Peek = %q, %v; want 'x'*4096, nil", got, err)
+		}
+	})).ts
+
+	cn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cn.Close()
+	buf := []byte("GET / HTTP/1.1\r\nHost: e.com\r\n\r\n")
+	buf = append(buf, []byte(needle)...)
+	if _, err := cn.Write(buf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -7151,10 +7173,6 @@ func testHeadBody(t *testing.T, mode testMode, chunked bool, method string) {
 // or disabled when the header is set to nil.
 func TestDisableContentLength(t *testing.T) { run(t, testDisableContentLength) }
 func testDisableContentLength(t *testing.T, mode testMode) {
-	if mode == http2Mode {
-		t.Skip("skipping until h2_bundle.go is updated; see https://go-review.googlesource.com/c/net/+/471535")
-	}
-
 	noCL := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
 		w.Header()["Content-Length"] = nil // disable the default Content-Length response
 		fmt.Fprintf(w, "OK")
@@ -7312,4 +7330,121 @@ func testServerReadAfterHandlerAbort100Continue(t *testing.T, mode testMode) {
 	}
 	readyc <- struct{}{} // server starts reading from the request body
 	readyc <- struct{}{} // server finishes reading from the request body
+}
+
+func TestInvalidChunkedBodies(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		b    string
+	}{{
+		name: "bare LF in chunk size",
+		b:    "1\na\r\n0\r\n\r\n",
+	}, {
+		name: "bare LF at body end",
+		b:    "1\r\na\r\n0\r\n\n",
+	}} {
+		t.Run(test.name, func(t *testing.T) {
+			reqc := make(chan error)
+			ts := newClientServerTest(t, http1Mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+				got, err := io.ReadAll(r.Body)
+				if err == nil {
+					t.Logf("read body: %q", got)
+				}
+				reqc <- err
+			})).ts
+
+			serverURL, err := url.Parse(ts.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			conn, err := net.Dial("tcp", serverURL.Host)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := conn.Write([]byte(
+				"POST / HTTP/1.1\r\n" +
+					"Host: localhost\r\n" +
+					"Transfer-Encoding: chunked\r\n" +
+					"Connection: close\r\n" +
+					"\r\n" +
+					test.b)); err != nil {
+				t.Fatal(err)
+			}
+			conn.(*net.TCPConn).CloseWrite()
+
+			if err := <-reqc; err == nil {
+				t.Errorf("server handler: io.ReadAll(r.Body) succeeded, want error")
+			}
+		})
+	}
+}
+
+// Issue #72100: Verify that we don't modify the caller's TLS.Config.NextProtos slice.
+func TestServerTLSNextProtos(t *testing.T) {
+	run(t, testServerTLSNextProtos, []testMode{https1Mode, http2Mode})
+}
+func testServerTLSNextProtos(t *testing.T, mode testMode) {
+	CondSkipHTTP2(t)
+
+	cert, err := tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafCert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	certpool := x509.NewCertPool()
+	certpool.AddCert(leafCert)
+
+	protos := new(Protocols)
+	switch mode {
+	case https1Mode:
+		protos.SetHTTP1(true)
+	case http2Mode:
+		protos.SetHTTP2(true)
+	}
+
+	wantNextProtos := []string{"http/1.1", "h2", "other"}
+	nextProtos := slices.Clone(wantNextProtos)
+
+	// We don't use httptest here because it overrides the tls.Config.
+	srv := &Server{
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   nextProtos,
+		},
+		Handler:   HandlerFunc(func(w ResponseWriter, req *Request) {}),
+		Protocols: protos,
+	}
+	tr := &Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    certpool,
+			NextProtos: nextProtos,
+		},
+		Protocols: protos,
+	}
+
+	listener := newLocalListener(t)
+	srvc := make(chan error, 1)
+	go func() {
+		srvc <- srv.ServeTLS(listener, "", "")
+	}()
+	t.Cleanup(func() {
+		srv.Close()
+		<-srvc
+	})
+
+	client := &Client{Transport: tr}
+	resp, err := client.Get("https://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if !slices.Equal(nextProtos, wantNextProtos) {
+		t.Fatalf("after running test: original NextProtos slice = %v, want %v", nextProtos, wantNextProtos)
+	}
 }

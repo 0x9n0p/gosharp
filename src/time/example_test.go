@@ -6,6 +6,7 @@ package time_test
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -106,6 +107,39 @@ func ExampleParseDuration() {
 	// There are 4210 seconds in 1h10m10s.
 	// There are 1000 nanoseconds in 1µs.
 	// There are 1.00e-06 seconds in 1µs.
+}
+
+func ExampleSince() {
+	start := time.Now()
+	expensiveCall()
+	elapsed := time.Since(start)
+	fmt.Printf("The call took %v to run.\n", elapsed)
+}
+
+func ExampleUntil() {
+	futureTime := time.Now().Add(5 * time.Second)
+	durationUntil := time.Until(futureTime)
+	fmt.Printf("Duration until future time: %.0f seconds", math.Ceil(durationUntil.Seconds()))
+	// Output: Duration until future time: 5 seconds
+}
+
+func ExampleDuration_Abs() {
+	positiveDuration := 5 * time.Second
+	negativeDuration := -3 * time.Second
+	minInt64CaseDuration := time.Duration(math.MinInt64)
+
+	absPositive := positiveDuration.Abs()
+	absNegative := negativeDuration.Abs()
+	absSpecial := minInt64CaseDuration.Abs() == time.Duration(math.MaxInt64)
+
+	fmt.Printf("Absolute value of positive duration: %v\n", absPositive)
+	fmt.Printf("Absolute value of negative duration: %v\n", absNegative)
+	fmt.Printf("Absolute value of MinInt64 equal to MaxInt64: %t\n", absSpecial)
+
+	// Output:
+	// Absolute value of positive duration: 5s
+	// Absolute value of negative duration: 3s
+	// Absolute value of MinInt64 equal to MaxInt64: true
 }
 
 func ExampleDuration_Hours() {
@@ -295,8 +329,8 @@ func ExampleTime_Format() {
 	// default format: 2015-02-25 11:06:39 -0800 PST
 	// Unix format: Wed Feb 25 11:06:39 PST 2015
 	// Same, in UTC: Wed Feb 25 19:06:39 UTC 2015
-	//in Shanghai with seconds: 2015-02-26T03:06:39 +080000
-	//in Shanghai with colon seconds: 2015-02-26T03:06:39 +08:00:00
+	// in Shanghai with seconds: 2015-02-26T03:06:39 +080000
+	// in Shanghai with colon seconds: 2015-02-26T03:06:39 +08:00:00
 	//
 	// Formats:
 	//
@@ -720,6 +754,31 @@ func ExampleTime_Sub() {
 	// difference = 12h0m0s
 }
 
+func ExampleTime_AppendBinary() {
+	t := time.Date(2025, 4, 1, 15, 30, 45, 123456789, time.UTC)
+
+	var buffer []byte
+	buffer, err := t.AppendBinary(buffer)
+	if err != nil {
+		panic(err)
+	}
+
+	var parseTime time.Time
+	err = parseTime.UnmarshalBinary(buffer[:])
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("t: %v\n", t)
+	fmt.Printf("parseTime: %v\n", parseTime)
+	fmt.Printf("equal: %v\n", parseTime.Equal(t))
+
+	// Output:
+	// t: 2025-04-01 15:30:45.123456789 +0000 UTC
+	// parseTime: 2025-04-01 15:30:45.123456789 +0000 UTC
+	// equal: true
+}
+
 func ExampleTime_AppendFormat() {
 	t := time.Date(2017, time.November, 4, 11, 0, 0, 0, time.UTC)
 	text := []byte("Time: ")
@@ -731,6 +790,21 @@ func ExampleTime_AppendFormat() {
 	// Time: 11:00AM
 }
 
+func ExampleTime_AppendText() {
+	t := time.Date(2025, 4, 1, 15, 30, 45, 123456789, time.UTC)
+
+	buffer := []byte("t: ")
+
+	buffer, err := t.AppendText(buffer)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%s\n", buffer)
+
+	// Output:
+	// t: 2025-04-01T15:30:45.123456789Z
+}
 func ExampleFixedZone() {
 	loc := time.FixedZone("UTC-8", -8*60*60)
 	t := time.Date(2009, time.November, 10, 23, 0, 0, 0, loc)

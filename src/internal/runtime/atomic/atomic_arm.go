@@ -74,6 +74,9 @@ func Xchg(addr *uint32, v uint32) uint32 {
 	}
 }
 
+//go:noescape
+func Xchg8(addr *uint8, v uint8) uint8
+
 //go:nosplit
 func Xchguintptr(addr *uintptr, v uintptr) uintptr {
 	return uintptr(Xchg((*uint32)(unsafe.Pointer(addr)), uint32(v)))
@@ -159,12 +162,14 @@ func goStore64(addr *uint64, v uint64) {
 	addrLock(addr).unlock()
 }
 
+//go:noescape
+func Or8(addr *uint8, v uint8)
+
 //go:nosplit
-func Or8(addr *uint8, v uint8) {
+func goOr8(addr *uint8, v uint8) {
 	// Align down to 4 bytes and use 32-bit CAS.
-	uaddr := uintptr(unsafe.Pointer(addr))
-	addr32 := (*uint32)(unsafe.Pointer(uaddr &^ 3))
-	word := uint32(v) << ((uaddr & 3) * 8) // little endian
+	addr32 := (*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(addr)) &^ 3))
+	word := uint32(v) << ((uintptr(unsafe.Pointer(addr)) & 3) * 8) // little endian
 	for {
 		old := *addr32
 		if Cas(addr32, old, old|word) {
@@ -173,13 +178,15 @@ func Or8(addr *uint8, v uint8) {
 	}
 }
 
+//go:noescape
+func And8(addr *uint8, v uint8)
+
 //go:nosplit
-func And8(addr *uint8, v uint8) {
+func goAnd8(addr *uint8, v uint8) {
 	// Align down to 4 bytes and use 32-bit CAS.
-	uaddr := uintptr(unsafe.Pointer(addr))
-	addr32 := (*uint32)(unsafe.Pointer(uaddr &^ 3))
-	word := uint32(v) << ((uaddr & 3) * 8)    // little endian
-	mask := uint32(0xFF) << ((uaddr & 3) * 8) // little endian
+	addr32 := (*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(addr)) &^ 3))
+	word := uint32(v) << ((uintptr(unsafe.Pointer(addr)) & 3) * 8)    // little endian
+	mask := uint32(0xFF) << ((uintptr(unsafe.Pointer(addr)) & 3) * 8) // little endian
 	word |= ^mask
 	for {
 		old := *addr32

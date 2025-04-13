@@ -14,19 +14,21 @@ import (
 	"unsafe"
 )
 
-// finblock is an array of finalizers to be executed. finblocks are
-// arranged in a linked list for the finalizer queue.
+const finBlockSize = 4 * 1024
+
+// finBlock is an block of finalizers/cleanups to be executed. finBlocks
+// are arranged in a linked list for the finalizer queue.
 //
-// finblock is allocated from non-GC'd memory, so any heap pointers
+// finBlock is allocated from non-GC'd memory, so any heap pointers
 // must be specially handled. GC currently assumes that the finalizer
 // queue does not grow during marking (but it can shrink).
-type finblock struct {
+type finBlock struct {
 	_       sys.NotInHeap
-	alllink *finblock
-	next    *finblock
+	alllink *finBlock
+	next    *finBlock
 	cnt     uint32
 	_       int32
-	fin     [(_FinBlockSize - 2*goarch.PtrSize - 2*4) / unsafe.Sizeof(finalizer{})]finalizer
+	fin     [(finBlockSize - 2*goarch.PtrSize - 2*4) / unsafe.Sizeof(finalizer{})]finalizer
 }
 
 var fingStatus atomic.Uint32
@@ -40,13 +42,15 @@ const (
 	fingWake
 )
 
-var finlock mutex  // protects the following variables
-var fing *g        // goroutine that runs finalizers
-var finq *finblock // list of finalizers that are to be executed
-var finc *finblock // cache of free blocks
-var finptrmask [_FinBlockSize / goarch.PtrSize / 8]byte
+var (
+	finlock    mutex     // protects the following variables
+	fing       *g        // goroutine that runs finalizers
+	finq       *finBlock // list of finalizers that are to be executed
+	finc       *finBlock // cache of free blocks
+	finptrmask [finBlockSize / goarch.PtrSize / 8]byte
+)
 
-var allfin *finblock // list of all blocks
+var allfin *finBlock // list of all blocks
 
 // NOTE: Layout known to queuefinalizer.
 type finalizer struct {
@@ -105,7 +109,7 @@ func queuefinalizer(p unsafe.Pointer, fn *funcval, nret uintptr, fint *_type, ot
 	lock(&finlock)
 	if finq == nil || finq.cnt == uint32(len(finq.fin)) {
 		if finc == nil {
-			finc = (*finblock)(persistentalloc(_FinBlockSize, 0, &memstats.gcMiscSys))
+			finc = (*finBlock)(persistentalloc(finBlockSize, 0, &memstats.gcMiscSys))
 			finc.alllink = allfin
 			allfin = finc
 			if finptrmask[0] == 0 {
@@ -160,7 +164,7 @@ func wakefing() *g {
 func createfing() {
 	// start the finalizer goroutine exactly once
 	if fingStatus.Load() == fingUninitialized && fingStatus.CompareAndSwap(fingUninitialized, fingCreated) {
-		go runfinq()
+		go runFinalizersAndCleanups()
 	}
 }
 
@@ -172,8 +176,8 @@ func finalizercommit(gp *g, lock unsafe.Pointer) bool {
 	return true
 }
 
-// This is the goroutine that runs all of the finalizers.
-func runfinq() {
+// This is the goroutine that runs all of the finalizers and cleanups.
+func runFinalizersAndCleanups() {
 	var (
 		frame    unsafe.Pointer
 		framecap uintptr
@@ -202,6 +206,22 @@ func runfinq() {
 			for i := fb.cnt; i > 0; i-- {
 				f := &fb.fin[i-1]
 
+				// arg will only be nil when a cleanup has been queued.
+				if f.arg == nil {
+					var cleanup func()
+					fn := unsafe.Pointer(f.fn)
+					cleanup = *(*func())(unsafe.Pointer(&fn))
+					fingStatus.Or(fingRunningFinalizer)
+					cleanup()
+					fingStatus.And(^fingRunningFinalizer)
+
+					f.fn = nil
+					f.arg = nil
+					f.ot = nil
+					atomic.Store(&fb.cnt, i-1)
+					continue
+				}
+
 				var regs abi.RegArgs
 				// The args may be passed in registers or on stack. Even for
 				// the register case, we still need the spill slots.
@@ -220,9 +240,10 @@ func runfinq() {
 					frame = mallocgc(framesz, nil, true)
 					framecap = framesz
 				}
-
+				// cleanups also have a nil fint. Cleanups should have been processed before
+				// reaching this point.
 				if f.fint == nil {
-					throw("missing type in runfinq")
+					throw("missing type in finalizer")
 				}
 				r := frame
 				if argRegs > 0 {
@@ -249,7 +270,7 @@ func runfinq() {
 						(*iface)(r).tab = assertE2I(ityp, (*eface)(r)._type)
 					}
 				default:
-					throw("bad kind in runfinq")
+					throw("bad type kind in finalizer")
 				}
 				fingStatus.Or(fingRunningFinalizer)
 				reflectcall(nil, unsafe.Pointer(f.fn), frame, uint32(framesz), uint32(framesz), uint32(framesz), &regs)
@@ -330,6 +351,9 @@ func blockUntilEmptyFinalizerQueue(timeout int64) bool {
 //
 // SetFinalizer(obj, nil) clears any finalizer associated with obj.
 //
+// New Go code should consider using [AddCleanup] instead, which is much
+// less error-prone than SetFinalizer.
+//
 // The argument obj must be a pointer to an object allocated by calling
 // new, by taking the address of a composite literal, or by taking the
 // address of a local variable.
@@ -409,11 +433,6 @@ func blockUntilEmptyFinalizerQueue(timeout int64) bool {
 // need to use appropriate synchronization, such as mutexes or atomic updates,
 // to avoid read-write races.
 func SetFinalizer(obj any, finalizer any) {
-	if debug.sbrk != 0 {
-		// debug.sbrk never frees memory, so no finalizers run
-		// (and we don't have the data structures to record them).
-		return
-	}
 	e := efaceOf(&obj)
 	etyp := e._type
 	if etyp == nil {
@@ -426,10 +445,14 @@ func SetFinalizer(obj any, finalizer any) {
 	if ot.Elem == nil {
 		throw("nil elem type!")
 	}
-
 	if inUserArenaChunk(uintptr(e.data)) {
 		// Arena-allocated objects are not eligible for finalizers.
 		throw("runtime.SetFinalizer: first argument was allocated into an arena")
+	}
+	if debug.sbrk != 0 {
+		// debug.sbrk never frees memory, so no finalizers run
+		// (and we don't have the data structures to record them).
+		return
 	}
 
 	// find the containing object

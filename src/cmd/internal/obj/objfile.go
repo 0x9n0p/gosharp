@@ -494,7 +494,7 @@ func contentHash64(s *LSym) goobj.Hash64Type {
 // For now, we assume there is no circular dependencies among
 // hashed symbols.
 func (w *writer) contentHash(s *LSym) goobj.HashType {
-	h := hash.New20()
+	h := hash.New32()
 	var tmp [14]byte
 
 	// Include the size of the symbol in the hash.
@@ -896,7 +896,7 @@ func (ctxt *Link) writeSymDebugNamed(s *LSym, name string) {
 		fmt.Fprintf(ctxt.Bso, "asm ")
 	}
 	fmt.Fprintf(ctxt.Bso, "size=%d", s.Size)
-	if s.Type == objabi.STEXT {
+	if s.Type.IsText() {
 		fn := s.Func()
 		fmt.Fprintf(ctxt.Bso, " args=%#x locals=%#x funcid=%#x align=%#x", uint64(fn.Args), uint64(fn.Locals), uint64(fn.FuncID), uint64(fn.Align))
 		if s.Leaf() {
@@ -904,7 +904,7 @@ func (ctxt *Link) writeSymDebugNamed(s *LSym, name string) {
 		}
 	}
 	fmt.Fprintf(ctxt.Bso, "\n")
-	if s.Type == objabi.STEXT {
+	if s.Type.IsText() {
 		for p := s.Func().Text; p != nil; p = p.Link {
 			fmt.Fprintf(ctxt.Bso, "\t%#04x ", uint(int(p.Pc)))
 			if ctxt.Debugasm > 1 {

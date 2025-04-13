@@ -105,8 +105,8 @@ E4:	CMPL BX, BP		// i < n
 	RET
 
 
-// func shlVU(z, x []Word, s uint) (c Word)
-TEXT ·shlVU(SB),NOSPLIT,$0
+// func lshVU(z, x []Word, s uint) (c Word)
+TEXT ·lshVU(SB),NOSPLIT,$0
 	MOVL z_len+4(FP), BX	// i = z
 	SUBL $1, BX		// i--
 	JL X8b			// i < 0	(n <= 0)
@@ -140,8 +140,8 @@ X8b:	MOVL $0, c+28(FP)
 	RET
 
 
-// func shrVU(z, x []Word, s uint) (c Word)
-TEXT ·shrVU(SB),NOSPLIT,$0
+// func rshVU(z, x []Word, s uint) (c Word)
+TEXT ·rshVU(SB),NOSPLIT,$0
 	MOVL z_len+4(FP), BP
 	SUBL $1, BP		// n--
 	JL X9b			// n < 0	(n <= 0)
@@ -177,12 +177,12 @@ X9b:	MOVL $0, c+28(FP)
 	RET
 
 
-// func mulAddVWW(z, x []Word, y, r Word) (c Word)
+// func mulAddVWW(z, x []Word, m, a Word) (c Word)
 TEXT ·mulAddVWW(SB),NOSPLIT,$0
 	MOVL z+0(FP), DI
 	MOVL x+12(FP), SI
-	MOVL y+24(FP), BP
-	MOVL r+28(FP), CX	// c = r
+	MOVL m+24(FP), BP
+	MOVL a+28(FP), CX	// c = a
 	MOVL z_len+4(FP), BX
 	LEAL (DI)(BX*4), DI
 	LEAL (SI)(BX*4), SI
@@ -204,23 +204,25 @@ E5:	CMPL BX, $0		// i < 0
 	RET
 
 
-// func addMulVVW(z, x []Word, y Word) (c Word)
-TEXT ·addMulVVW(SB),NOSPLIT,$0
-	MOVL z+0(FP), DI
-	MOVL x+12(FP), SI
-	MOVL y+24(FP), BP
+// func addMulVVWW(z, x, y []Word, m, a Word) (c Word)
+TEXT ·addMulVVWW(SB),NOSPLIT,$0
+	MOVL z+0(FP), BP
+	MOVL x+12(FP), DI
+	MOVL y+24(FP), SI
+	MOVL a+40(FP), CX
 	MOVL z_len+4(FP), BX
 	LEAL (DI)(BX*4), DI
 	LEAL (SI)(BX*4), SI
+	LEAL (BP)(BX*4), BP
 	NEGL BX			// i = -n
-	MOVL $0, CX		// c = 0
 	JMP E6
 
 L6:	MOVL (SI)(BX*4), AX
-	MULL BP
+	MULL m+36(FP)
 	ADDL CX, AX
 	ADCL $0, DX
-	ADDL AX, (DI)(BX*4)
+	ADDL (DI)(BX*4), AX
+	MOVL AX, (BP)(BX*4)
 	ADCL $0, DX
 	MOVL DX, CX
 	ADDL $1, BX		// i++
@@ -228,7 +230,7 @@ L6:	MOVL (SI)(BX*4), AX
 E6:	CMPL BX, $0		// i < 0
 	JL L6
 
-	MOVL CX, c+28(FP)
+	MOVL CX, c+44(FP)
 	RET
 
 

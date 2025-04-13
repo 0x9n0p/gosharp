@@ -68,7 +68,7 @@ func randinit() {
 			buf := make([]byte, 8)
 			for {
 				if x, ok := globalRand.state.Next(); ok {
-					byteorder.BePutUint64(buf, x)
+					byteorder.BEPutUint64(buf, x)
 					break
 				}
 				globalRand.state.Refill()
@@ -151,6 +151,8 @@ func rand32() uint32 {
 }
 
 // rand returns a random uint64 from the per-m chacha8 state.
+// This is called from compiler-generated code.
+//
 // Do not change signature: used via linkname from other packages.
 //
 //go:nosplit

@@ -46,11 +46,19 @@ func (d *dirInfo) close() {
 
 func (f *File) readdir(n int, mode readdirMode) (names []string, dirents []DirEntry, infos []FileInfo, err error) {
 	// If this file has no dirInfo, create one.
-	d := f.dirinfo.Load()
-	if d == nil {
-		d = new(dirInfo)
-		f.dirinfo.Store(d)
+	var d *dirInfo
+	for {
+		d = f.dirinfo.Load()
+		if d != nil {
+			break
+		}
+		newD := new(dirInfo)
+		if f.dirinfo.CompareAndSwap(nil, newD) {
+			d = newD
+			break
+		}
 	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.buf == nil {
@@ -175,11 +183,11 @@ func readIntBE(b []byte, size uintptr) uint64 {
 	case 1:
 		return uint64(b[0])
 	case 2:
-		return uint64(byteorder.BeUint16(b))
+		return uint64(byteorder.BEUint16(b))
 	case 4:
-		return uint64(byteorder.BeUint32(b))
+		return uint64(byteorder.BEUint32(b))
 	case 8:
-		return uint64(byteorder.BeUint64(b))
+		return uint64(byteorder.BEUint64(b))
 	default:
 		panic("syscall: readInt with unsupported size")
 	}
@@ -190,11 +198,11 @@ func readIntLE(b []byte, size uintptr) uint64 {
 	case 1:
 		return uint64(b[0])
 	case 2:
-		return uint64(byteorder.LeUint16(b))
+		return uint64(byteorder.LEUint16(b))
 	case 4:
-		return uint64(byteorder.LeUint32(b))
+		return uint64(byteorder.LEUint32(b))
 	case 8:
-		return uint64(byteorder.LeUint64(b))
+		return uint64(byteorder.LEUint64(b))
 	default:
 		panic("syscall: readInt with unsupported size")
 	}

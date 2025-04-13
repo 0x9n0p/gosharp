@@ -6,10 +6,7 @@
 
 package poll
 
-import (
-	"internal/syscall/unix"
-	"syscall"
-)
+import "internal/syscall/unix"
 
 // CopyFileRange copies at most remain bytes of data from src to dst, using
 // the copy_file_range system call. dst and src must refer to regular files.
@@ -19,10 +16,7 @@ func CopyFileRange(dst, src *FD, remain int64) (written int64, handled bool, err
 	}
 
 	for remain > 0 {
-		max := remain
-		if max > maxCopyFileRangeRound {
-			max = maxCopyFileRangeRound
-		}
+		max := min(remain, maxCopyFileRangeRound)
 		n, e := copyFileRange(dst, src, int(max))
 		if n > 0 {
 			remain -= n
@@ -66,12 +60,8 @@ func copyFileRange(dst, src *FD, max int) (written int64, err error) {
 		return 0, err
 	}
 	defer src.readUnlock()
-	var n int
-	for {
-		n, err = unix.CopyFileRange(src.Sysfd, nil, dst.Sysfd, nil, max, 0)
-		if err != syscall.EINTR {
-			break
-		}
-	}
-	return int64(n), err
+	return ignoringEINTR2(func() (int64, error) {
+		n, err := unix.CopyFileRange(src.Sysfd, nil, dst.Sysfd, nil, max, 0)
+		return int64(n), err
+	})
 }

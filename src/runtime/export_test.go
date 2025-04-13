@@ -94,9 +94,9 @@ func Netpoll(delta int64) {
 	})
 }
 
-func GCMask(x any) (ret []byte) {
+func PointerMask(x any) (ret []byte) {
 	systemstack(func() {
-		ret = getgcmask(x)
+		ret = pointerMask(x)
 	})
 	return
 }
@@ -536,7 +536,7 @@ func MapNextArenaHint() (start, end uintptr, ok bool) {
 	} else {
 		start, end = addr, addr+heapArenaBytes
 	}
-	got := sysReserve(unsafe.Pointer(addr), physPageSize)
+	got := sysReserve(unsafe.Pointer(addr), physPageSize, "")
 	ok = (addr == uintptr(got))
 	if !ok {
 		// We were unable to get the requested reservation.
@@ -1264,7 +1264,7 @@ const (
 
 type TimeHistogram timeHistogram
 
-// Counts returns the counts for the given bucket, subBucket indices.
+// Count returns the counts for the given bucket, subBucket indices.
 // Returns true if the bucket was valid, otherwise returns the counts
 // for the overflow bucket if bucket > 0 or the underflow bucket if
 // bucket < 0, and false.
@@ -1836,4 +1836,46 @@ func (m *TraceMap) PutString(s string) (uint64, bool) {
 
 func (m *TraceMap) Reset() {
 	m.traceMap.reset()
+}
+
+func SetSpinInGCMarkDone(spin bool) {
+	gcDebugMarkDone.spinAfterRaggedBarrier.Store(spin)
+}
+
+func GCMarkDoneRestarted() bool {
+	// Only read this outside of the GC. If we're running during a GC, just report false.
+	mp := acquirem()
+	if gcphase != _GCoff {
+		releasem(mp)
+		return false
+	}
+	restarted := gcDebugMarkDone.restartedDueTo27993
+	releasem(mp)
+	return restarted
+}
+
+func GCMarkDoneResetRestartFlag() {
+	mp := acquirem()
+	for gcphase != _GCoff {
+		releasem(mp)
+		Gosched()
+		mp = acquirem()
+	}
+	gcDebugMarkDone.restartedDueTo27993 = false
+	releasem(mp)
+}
+
+type BitCursor struct {
+	b bitCursor
+}
+
+func NewBitCursor(buf *byte) BitCursor {
+	return BitCursor{b: bitCursor{ptr: buf, n: 0}}
+}
+
+func (b BitCursor) Write(data *byte, cnt uintptr) {
+	b.b.write(data, cnt)
+}
+func (b BitCursor) Offset(cnt uintptr) BitCursor {
+	return BitCursor{b: b.b.offset(cnt)}
 }

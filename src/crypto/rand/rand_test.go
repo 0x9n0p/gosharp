@@ -7,16 +7,18 @@ package rand
 import (
 	"bytes"
 	"compress/flate"
-	"crypto/internal/boring"
+	"crypto/internal/cryptotest"
 	"errors"
-	"internal/race"
 	"internal/testenv"
 	"io"
 	"os"
-	"runtime"
 	"sync"
 	"testing"
 )
+
+// These tests are mostly duplicates of the tests in crypto/internal/sysrand,
+// and testing both the Reader and Read is pretty redundant when one calls the
+// other, but better safe than sorry.
 
 func testReadAndReader(t *testing.T, f func(*testing.T, func([]byte) (int, error))) {
 	t.Run("Read", func(t *testing.T) {
@@ -151,15 +153,7 @@ func testConcurrentRead(t *testing.T, Read func([]byte) (int, error)) {
 var sink byte
 
 func TestAllocations(t *testing.T) {
-	if boring.Enabled {
-		// Might be fixable with https://go.dev/issue/56378.
-		t.Skip("boringcrypto allocates")
-	}
-	if race.Enabled {
-		t.Skip("urandomRead allocates under -race")
-	}
-	testenv.SkipIfOptimizationOff(t)
-
+	cryptotest.SkipTestAllocations(t)
 	n := int(testing.AllocsPerRun(10, func() {
 		buf := make([]byte, 32)
 		Read(buf)
@@ -170,48 +164,23 @@ func TestAllocations(t *testing.T) {
 	}
 }
 
-// TestNoUrandomFallback ensures the urandom fallback is not reached in
-// normal operations.
-func TestNoUrandomFallback(t *testing.T) {
-	expectFallback := false
-	if runtime.GOOS == "aix" {
-		// AIX always uses the urandom fallback.
-		expectFallback = true
-	}
-	if os.Getenv("GO_GETRANDOM_DISABLED") == "1" {
-		// We are testing the urandom fallback intentionally.
-		expectFallback = true
-	}
-	Read(make([]byte, 1))
-	if urandomFile != nil && !expectFallback {
-		t.Error("/dev/urandom fallback used unexpectedly")
-		t.Log("note: if this test fails, it may be because the system does not have getrandom(2)")
-	}
-	if urandomFile == nil && expectFallback {
-		t.Error("/dev/urandom fallback not used as expected")
-	}
-}
-
 func TestReadError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping test in short mode")
 	}
-	testenv.MustHaveExec(t)
 
-	// We run this test in a subprocess because it's expected to crash the
-	// program unless the GODEBUG is set.
+	// We run this test in a subprocess because it's expected to crash.
 	if os.Getenv("GO_TEST_READ_ERROR") == "1" {
 		defer func(r io.Reader) { Reader = r }(Reader)
 		Reader = readerFunc(func([]byte) (int, error) {
 			return 0, errors.New("error")
 		})
-		if _, err := Read(make([]byte, 32)); err == nil {
-			t.Error("Read did not return error")
-		}
+		Read(make([]byte, 32))
+		t.Error("Read did not crash")
 		return
 	}
 
-	cmd := testenv.Command(t, os.Args[0], "-test.run=TestReadError")
+	cmd := testenv.Command(t, testenv.Executable(t), "-test.run=^TestReadError$")
 	cmd.Env = append(os.Environ(), "GO_TEST_READ_ERROR=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -220,13 +189,6 @@ func TestReadError(t *testing.T) {
 	exp := "fatal error: crypto/rand: failed to read random data"
 	if !bytes.Contains(out, []byte(exp)) {
 		t.Errorf("subprocess output does not contain %q: %s", exp, out)
-	}
-
-	cmd = testenv.Command(t, os.Args[0], "-test.run=TestReadError")
-	cmd.Env = append(os.Environ(), "GO_TEST_READ_ERROR=1", "GODEBUG=randcrash=0")
-	out, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Errorf("subprocess failed: %v\n%s", err, out)
 	}
 }
 

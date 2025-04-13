@@ -28,6 +28,8 @@ import (
 //
 // Users of the slog package should not invoke Handler methods directly.
 // They should use the methods of [Logger] instead.
+//
+// Before implementing your own handler, consult https://go.dev/s/slog-handler-guide.
 type Handler interface {
 	// Enabled reports whether the handler handles records at the given level.
 	// The handler ignores records whose level is lower.
@@ -57,6 +59,9 @@ type Handler interface {
 	//   - If a group's key is empty, inline the group's Attrs.
 	//   - If a group has no Attrs (even if it has a non-empty key),
 	//     ignore it.
+	//
+	// [Logger] discards any errors from Handle. Wrap the Handle method to
+	// process any errors from Handlers.
 	Handle(context.Context, Record) error
 
 	// WithAttrs returns a new Handler whose attributes consist of
@@ -525,8 +530,7 @@ func (s *handleState) appendError(err error) {
 func (s *handleState) appendKey(key string) {
 	s.buf.WriteString(s.sep)
 	if s.prefix != nil && len(*s.prefix) > 0 {
-		// TODO: optimize by avoiding allocation.
-		s.appendString(string(*s.prefix) + key)
+		s.appendTwoStrings(string(*s.prefix), key)
 	} else {
 		s.appendString(key)
 	}
@@ -536,6 +540,24 @@ func (s *handleState) appendKey(key string) {
 		s.buf.WriteByte('=')
 	}
 	s.sep = s.h.attrSep()
+}
+
+// appendTwoStrings implements appendString(prefix + key), but faster.
+func (s *handleState) appendTwoStrings(x, y string) {
+	buf := *s.buf
+	switch {
+	case s.h.json:
+		buf.WriteByte('"')
+		buf = appendEscapedJSONString(buf, x)
+		buf = appendEscapedJSONString(buf, y)
+		buf.WriteByte('"')
+	case !needsQuoting(x) && !needsQuoting(y):
+		buf.WriteString(x)
+		buf.WriteString(y)
+	default:
+		buf = strconv.AppendQuote(buf, x+y)
+	}
+	*s.buf = buf
 }
 
 func (s *handleState) appendString(str string) {
@@ -602,3 +624,14 @@ func appendRFC3339Millis(b []byte, t time.Time) []byte {
 	b = append(b[:n+prefixLen], b[n+prefixLen+1:]...) // drop the 4th digit
 	return b
 }
+
+// DiscardHandler discards all log output.
+// DiscardHandler.Enabled returns false for all Levels.
+var DiscardHandler Handler = discardHandler{}
+
+type discardHandler struct{}
+
+func (dh discardHandler) Enabled(context.Context, Level) bool  { return false }
+func (dh discardHandler) Handle(context.Context, Record) error { return nil }
+func (dh discardHandler) WithAttrs(attrs []Attr) Handler       { return dh }
+func (dh discardHandler) WithGroup(name string) Handler        { return dh }

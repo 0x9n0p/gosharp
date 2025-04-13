@@ -220,7 +220,12 @@ func (o *orderState) safeExpr(n ir.Node) ir.Node {
 //
 //	n.Left = o.addrTemp(n.Left)
 func (o *orderState) addrTemp(n ir.Node) ir.Node {
-	if n.Op() == ir.OLITERAL || n.Op() == ir.ONIL {
+	// Note: Avoid addrTemp with static assignment for literal strings
+	// when compiling FIPS packages.
+	// The problem is that panic("foo") ends up creating a static RODATA temp
+	// for the implicit conversion of "foo" to any, and we can't handle
+	// the relocations in that temp.
+	if n.Op() == ir.ONIL || (n.Op() == ir.OLITERAL && !base.Ctxt.IsFIPS()) {
 		// TODO: expand this to all static composite literal nodes?
 		n = typecheck.DefaultLit(n, nil)
 		types.CalcSize(n.Type())
@@ -329,6 +334,14 @@ func (o *orderState) mapKeyTemp(outerPos src.XPos, t *types.Type, n ir.Node) ir.
 // It would be nice to handle these generally, but because
 // []byte keys are not allowed in maps, the use of string(k)
 // comes up in important cases in practice. See issue 3512.
+//
+// Note that this code does not handle the case:
+//
+//      s := string(k)
+//      x = m[s]
+//
+// Cases like this are handled during SSA, search for slicebytetostring
+// in ../ssa/_gen/generic.rules.
 func mapKeyReplaceStrConv(n ir.Node) bool {
 	var replaced bool
 	switch n.Op() {
@@ -448,7 +461,7 @@ func (o *orderState) edge() {
 	// never 0.
 	// Another policy presented in the paper is the Saturated Counters policy which
 	// freezes the counter when it reaches the value of 255. However, a range
-	// of experiments showed that that decreases overall performance.
+	// of experiments showed that doing so decreases overall performance.
 	o.append(ir.NewIfStmt(base.Pos,
 		ir.NewBinaryExpr(base.Pos, ir.OEQ, counter, ir.NewInt(base.Pos, 0xff)),
 		[]ir.Node{ir.NewAssignStmt(base.Pos, counter, ir.NewInt(base.Pos, 1))},
@@ -1214,7 +1227,7 @@ func (o *orderState) expr1(n, lhs ir.Node) ir.Node {
 			}
 		}
 
-		// key may need to be be addressable
+		// key may need to be addressable
 		n.Index = o.mapKeyTemp(n.Pos(), n.X.Type(), n.Index)
 		if needCopy {
 			return o.copyExpr(n)

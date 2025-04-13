@@ -71,11 +71,11 @@ func concatstring4(*[32]byte, string, string, string, string) string
 func concatstring5(*[32]byte, string, string, string, string, string) string
 func concatstrings(*[32]byte, []string) string
 
-func concatbyte2(string, string) []byte
-func concatbyte3(string, string, string) []byte
-func concatbyte4(string, string, string, string) []byte
-func concatbyte5(string, string, string, string, string) []byte
-func concatbytes([]string) []byte
+func concatbyte2(*[32]byte, string, string) []byte
+func concatbyte3(*[32]byte, string, string, string) []byte
+func concatbyte4(*[32]byte, string, string, string, string) []byte
+func concatbyte5(*[32]byte, string, string, string, string, string) []byte
+func concatbytes(*[32]byte, []string) []byte
 
 func cmpstring(string, string) int
 func intstring(*[4]byte, int64) string
@@ -129,6 +129,7 @@ func panicrangestate(state int)
 // defer in range over func
 func deferrangefunc() interface{}
 
+func rand() uint64
 func rand32() uint32
 
 // *byte is really *runtime.Type
@@ -151,12 +152,14 @@ func mapassign_fast32ptr(mapType *byte, hmap map[any]any, key unsafe.Pointer) (v
 func mapassign_fast64(mapType *byte, hmap map[any]any, key uint64) (val *any)
 func mapassign_fast64ptr(mapType *byte, hmap map[any]any, key unsafe.Pointer) (val *any)
 func mapassign_faststr(mapType *byte, hmap map[any]any, key string) (val *any)
-func mapiterinit(mapType *byte, hmap map[any]any, hiter *any)
+func mapiterinit(mapType *byte, hmap map[any]any, hiter *any)  // old maps
+func mapIterStart(mapType *byte, hmap map[any]any, hiter *any) // swiss maps
 func mapdelete(mapType *byte, hmap map[any]any, key *any)
 func mapdelete_fast32(mapType *byte, hmap map[any]any, key uint32)
 func mapdelete_fast64(mapType *byte, hmap map[any]any, key uint64)
 func mapdelete_faststr(mapType *byte, hmap map[any]any, key string)
-func mapiternext(hiter *any)
+func mapiternext(hiter *any) // old maps
+func mapIterNext(hiter *any) // swiss maps
 func mapclear(mapType *byte, hmap map[any]any)
 
 // *byte is really *runtime.Type
@@ -288,5 +291,8 @@ var x86HasSSE41 bool
 var x86HasFMA bool
 var armHasVFPv4 bool
 var arm64HasATOMICS bool
+var loong64HasLAMCAS bool
+var loong64HasLAM_BH bool
+var loong64HasLSX bool
 
 func asanregisterglobals(unsafe.Pointer, uintptr)

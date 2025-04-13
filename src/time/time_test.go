@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -915,6 +916,16 @@ func TestMarshalInvalidTimes(t *testing.T) {
 		case err == nil || err.Error() != want:
 			t.Errorf("(%v).MarshalText() error = %v, want %v", tt.time, err, want)
 		}
+
+		buf := make([]byte, 0, 64)
+		want = strings.ReplaceAll(tt.want, "MarshalJSON", "AppendText")
+		b, err = tt.time.AppendText(buf)
+		switch {
+		case b != nil:
+			t.Errorf("(%v).AppendText() = %q, want nil", tt.time, b)
+		case err == nil || err.Error() != want:
+			t.Errorf("(%v).AppendText() error = %v, want %v", tt.time, err, want)
+		}
 	}
 }
 
@@ -1114,10 +1125,15 @@ func TestLoadFixed(t *testing.T) {
 	// So GMT+1 corresponds to -3600 in the Go zone, not +3600.
 	name, offset := Now().In(loc).Zone()
 	// The zone abbreviation is "-01" since tzdata-2016g, and "GMT+1"
-	// on earlier versions; we accept both. (Issue #17276).
-	if !(name == "GMT+1" || name == "-01") || offset != -1*60*60 {
-		t.Errorf("Now().In(loc).Zone() = %q, %d, want %q or %q, %d",
-			name, offset, "GMT+1", "-01", -1*60*60)
+	// on earlier versions; we accept both. (Issue 17276.)
+	wantName := []string{"GMT+1", "-01"}
+	// The zone abbreviation may be "+01" on OpenBSD. (Issue 69840.)
+	if runtime.GOOS == "openbsd" {
+		wantName = append(wantName, "+01")
+	}
+	if !slices.Contains(wantName, name) || offset != -1*60*60 {
+		t.Errorf("Now().In(loc).Zone() = %q, %d, want %q (one of), %d",
+			name, offset, wantName, -1*60*60)
 	}
 }
 
@@ -1384,7 +1400,7 @@ var defaultLocTests = []struct {
 	{"Add", func(t1, t2 Time) bool { return t1.Add(Hour).Equal(t2.Add(Hour)) }},
 	{"Sub", func(t1, t2 Time) bool { return t1.Sub(t2) == t2.Sub(t1) }},
 
-	//Original caus for this test case bug 15852
+	// Original cause for this test case bug 15852
 	{"AddDate", func(t1, t2 Time) bool { return t1.AddDate(1991, 9, 3) == t2.AddDate(1991, 9, 3) }},
 
 	{"UTC", func(t1, t2 Time) bool { return t1.UTC() == t2.UTC() }},
@@ -1478,6 +1494,20 @@ func BenchmarkNowUnixMilli(b *testing.B) {
 func BenchmarkNowUnixMicro(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		u = Now().UnixMicro()
+	}
+}
+
+func BenchmarkSince(b *testing.B) {
+	start := Now()
+	for b.Loop() {
+		u = int64(Since(start))
+	}
+}
+
+func BenchmarkUntil(b *testing.B) {
+	end := Now().Add(1 * Hour)
+	for b.Loop() {
+		u = int64(Until(end))
 	}
 }
 

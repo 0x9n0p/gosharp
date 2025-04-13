@@ -6,11 +6,11 @@ package unique
 
 import (
 	"internal/abi"
-	"internal/concurrent"
-	"internal/weak"
+	isync "internal/sync"
 	"runtime"
 	"sync"
 	"unsafe"
+	"weak"
 )
 
 var zero uintptr
@@ -76,7 +76,7 @@ func Make[T comparable](value T) Handle[T] {
 		}
 		// Now that we're sure there's a value in the map, let's
 		// try to get the pointer we need out of it.
-		ptr = wp.Strong()
+		ptr = wp.Value()
 		if ptr != nil {
 			break
 		}
@@ -98,7 +98,7 @@ var (
 	// benefit of not cramming every different type into a single map, but that's certainly
 	// not enough to outweigh the cost of two map lookups. What is worth it though, is saving
 	// on those allocations.
-	uniqueMaps = concurrent.NewHashTrieMap[*abi.Type, any]() // any is always a *uniqueMap[T].
+	uniqueMaps isync.HashTrieMap[*abi.Type, any] // any is always a *uniqueMap[T].
 
 	// cleanupFuncs are functions that clean up dead weak pointers in type-specific
 	// maps in uniqueMaps. We express cleanup this way because there's no way to iterate
@@ -114,7 +114,7 @@ var (
 )
 
 type uniqueMap[T comparable] struct {
-	*concurrent.HashTrieMap[T, weak.Pointer[T]]
+	isync.HashTrieMap[T, weak.Pointer[T]]
 	cloneSeq
 }
 
@@ -123,10 +123,7 @@ func addUniqueMap[T comparable](typ *abi.Type) *uniqueMap[T] {
 	// race with someone else, but that's fine; it's one
 	// small, stray allocation. The number of allocations
 	// this can create is bounded by a small constant.
-	m := &uniqueMap[T]{
-		HashTrieMap: concurrent.NewHashTrieMap[T, weak.Pointer[T]](),
-		cloneSeq:    makeCloneSeq(typ),
-	}
+	m := &uniqueMap[T]{cloneSeq: makeCloneSeq(typ)}
 	a, loaded := uniqueMaps.LoadOrStore(typ, m)
 	if !loaded {
 		// Add a cleanup function for the new map.
@@ -135,7 +132,7 @@ func addUniqueMap[T comparable](typ *abi.Type) *uniqueMap[T] {
 			// Delete all the entries whose weak references are nil and clean up
 			// deleted entries.
 			m.All()(func(key T, wp weak.Pointer[T]) bool {
-				if wp.Strong() == nil {
+				if wp.Value() == nil {
 					m.CompareAndDelete(key, wp)
 				}
 				return true

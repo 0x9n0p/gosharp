@@ -207,7 +207,7 @@ func (check *Checker) lhsVar(lhs ast.Expr) Type {
 			// dot-imported variables.
 			if w, _ := obj.(*Var); w != nil && w.pkg == check.pkg {
 				v = w
-				v_used = v.used
+				v_used = check.usedVars[v]
 			}
 		}
 	}
@@ -216,7 +216,7 @@ func (check *Checker) lhsVar(lhs ast.Expr) Type {
 	check.expr(nil, &x, lhs)
 
 	if v != nil {
-		v.used = v_used // restore v.used
+		check.usedVars[v] = v_used // restore v.used
 	}
 
 	if x.mode == invalid || !isValid(x.typ) {
@@ -298,7 +298,11 @@ func varTypes(list []*Var) (res []Type) {
 // ti's are user-friendly string representations for the given types.
 // If variadic is set and the last type is a slice, its string is of
 // the form "...E" where E is the slice's element type.
-func (check *Checker) typesSummary(list []Type, variadic bool) string {
+// If hasDots is set, the last argument string is of the form "T..."
+// where T is the last type.
+// Only one of variadic and hasDots may be set.
+func (check *Checker) typesSummary(list []Type, variadic, hasDots bool) string {
+	assert(!(variadic && hasDots))
 	var res []string
 	for i, t := range list {
 		var s string
@@ -307,7 +311,7 @@ func (check *Checker) typesSummary(list []Type, variadic bool) string {
 			fallthrough // should not happen but be cautious
 		case !isValid(t):
 			s = "unknown type"
-		case isUntyped(t):
+		case isUntyped(t): // => *Basic
 			if isNumeric(t) {
 				// Do not imply a specific type requirement:
 				// "have number, want float64" is better than
@@ -319,11 +323,21 @@ func (check *Checker) typesSummary(list []Type, variadic bool) string {
 				// for compactness.
 				s = strings.Replace(t.(*Basic).name, "untyped ", "", -1)
 			}
-		case variadic && i == len(list)-1:
-			s = check.sprintf("...%s", t.(*Slice).elem)
-		}
-		if s == "" {
+		default:
 			s = check.sprintf("%s", t)
+		}
+		// handle ... parameters/arguments
+		if i == len(list)-1 {
+			switch {
+			case variadic:
+				// In correct code, the parameter type is a slice, but be careful.
+				if t, _ := t.(*Slice); t != nil {
+					s = check.sprintf("%s", t.elem)
+				}
+				s = "..." + s
+			case hasDots:
+				s += "..."
+			}
 		}
 		res = append(res, s)
 	}
@@ -362,8 +376,8 @@ func (check *Checker) returnError(at positioner, lhs []*Var, rhs []*operand) {
 	}
 	err := check.newError(WrongResultCount)
 	err.addf(at, "%s return values", qualifier)
-	err.addf(noposn, "have %s", check.typesSummary(operandTypes(rhs), false))
-	err.addf(noposn, "want %s", check.typesSummary(varTypes(lhs), false))
+	err.addf(noposn, "have %s", check.typesSummary(operandTypes(rhs), false, false))
+	err.addf(noposn, "want %s", check.typesSummary(varTypes(lhs), false, false))
 	err.report()
 }
 
@@ -555,7 +569,7 @@ func (check *Checker) shortVarDecl(pos positioner, lhs, rhs []ast.Expr) {
 		}
 
 		// declare new variable
-		obj := NewVar(ident.Pos(), check.pkg, name, nil)
+		obj := newVar(LocalVar, ident.Pos(), check.pkg, name, nil)
 		lhsVars[i] = obj
 		if name != "_" {
 			newVars = append(newVars, obj)
@@ -566,7 +580,7 @@ func (check *Checker) shortVarDecl(pos positioner, lhs, rhs []ast.Expr) {
 	// create dummy variables where the lhs is invalid
 	for i, obj := range lhsVars {
 		if obj == nil {
-			lhsVars[i] = NewVar(lhs[i].Pos(), check.pkg, "_", nil)
+			lhsVars[i] = newVar(LocalVar, lhs[i].Pos(), check.pkg, "_", nil)
 		}
 	}
 

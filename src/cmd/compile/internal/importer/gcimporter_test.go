@@ -6,9 +6,11 @@ package importer
 
 import (
 	"bytes"
+	"cmd/compile/internal/syntax"
 	"cmd/compile/internal/types2"
 	"fmt"
 	"go/build"
+	"internal/exportdata"
 	"internal/testenv"
 	"os"
 	"os/exec"
@@ -16,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,7 +102,7 @@ func TestImportTestdata(t *testing.T) {
 
 		importMap := map[string]string{}
 		for _, pkg := range wantImports {
-			export, _, err := FindPkg(pkg, "testdata")
+			export, _, err := exportdata.FindPkg(pkg, "testdata")
 			if export == "" {
 				t.Fatalf("no export data found for %s: %v", pkg, err)
 			}
@@ -160,17 +163,29 @@ func TestVersionHandling(t *testing.T) {
 		// test that export data can be imported
 		_, err := Import(make(map[string]*types2.Package), pkgpath, dir, nil)
 		if err != nil {
-			// ok to fail if it fails with a no longer supported error for select files
+			// ok to fail if it fails with a 'not the start of an archive file' error for select files
 			if strings.Contains(err.Error(), "no longer supported") {
 				switch name {
-				case "test_go1.7_0.a", "test_go1.7_1.a",
-					"test_go1.8_4.a", "test_go1.8_5.a",
-					"test_go1.11_6b.a", "test_go1.11_999b.a":
+				case "test_go1.8_4.a",
+					"test_go1.8_5.a":
 					continue
 				}
 				// fall through
 			}
-			// ok to fail if it fails with a newer version error for select files
+			// ok to fail if it fails with a 'no longer supported' error for select files
+			if strings.Contains(err.Error(), "no longer supported") {
+				switch name {
+				case "test_go1.7_0.a",
+					"test_go1.7_1.a",
+					"test_go1.8_4.a",
+					"test_go1.8_5.a",
+					"test_go1.11_6b.a",
+					"test_go1.11_999b.a":
+					continue
+				}
+				// fall through
+			}
+			// ok to fail if it fails with a 'newer version' error for select files
 			if strings.Contains(err.Error(), "newer version") {
 				switch name {
 				case "test_go1.11_999i.a":
@@ -190,6 +205,8 @@ func TestVersionHandling(t *testing.T) {
 		}
 		// 2) find export data
 		i := bytes.Index(data, []byte("\n$$B\n")) + 5
+		// Export data can contain "\n$$\n" in string constants, however,
+		// searching for the next end of section marker "\n$$\n" is good enough for testzs.
 		j := bytes.Index(data[i:], []byte("\n$$\n")) + i
 		if i < 0 || j < 0 || i > j {
 			t.Fatalf("export data section not found (i = %d, j = %d)", i, j)
@@ -226,7 +243,7 @@ func TestImportStdLib(t *testing.T) {
 
 	// Get list of packages in stdlib. Filter out test-only packages with {{if .GoFiles}} check.
 	var stderr bytes.Buffer
-	cmd := exec.Command("go", "list", "-f", "{{if .GoFiles}}{{.ImportPath}}{{end}}", "std")
+	cmd := exec.Command(testenv.GoToolPath(t), "list", "-f", "{{if .GoFiles}}{{.ImportPath}}{{end}}", "std")
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
@@ -262,7 +279,7 @@ var importedObjectTests = []struct {
 	{"math.Pi", "const Pi untyped float"},
 	{"math.Sin", "func Sin(x float64) float64"},
 	{"go/ast.NotNilFilter", "func NotNilFilter(_ string, v reflect.Value) bool"},
-	{"go/internal/gcimporter.FindPkg", "func FindPkg(path string, srcDir string) (filename string, id string, err error)"},
+	{"internal/exportdata.FindPkg", "func FindPkg(path string, srcDir string) (filename string, id string, err error)"},
 
 	// interfaces
 	{"context.Context", "type Context interface{Deadline() (deadline time.Time, ok bool); Done() <-chan struct{}; Err() error; Value(key any) any}"},
@@ -424,7 +441,7 @@ func TestIssue13566(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonExport, _, err := FindPkg("encoding/json", "testdata")
+	jsonExport, _, err := exportdata.FindPkg("encoding/json", "testdata")
 	if jsonExport == "" {
 		t.Fatalf("no export data found for encoding/json: %v", err)
 	}
@@ -592,4 +609,67 @@ func lookupObj(t *testing.T, scope *types2.Scope, name string) types2.Object {
 	t.Helper()
 	t.Fatalf("%s not found", name)
 	return nil
+}
+
+// importMap implements the types2.Importer interface.
+type importMap map[string]*types2.Package
+
+func (m importMap) Import(path string) (*types2.Package, error) { return m[path], nil }
+
+func TestIssue69912(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+	}
+
+	tmpdir := t.TempDir()
+	testoutdir := filepath.Join(tmpdir, "testdata")
+	if err := os.Mkdir(testoutdir, 0700); err != nil {
+		t.Fatalf("making output dir: %v", err)
+	}
+
+	compile(t, "testdata", "issue69912.go", testoutdir, nil)
+
+	issue69912, err := Import(make(map[string]*types2.Package), "./testdata/issue69912", tmpdir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(pkgname, src string, imports importMap) (*types2.Package, error) {
+		f, err := syntax.Parse(syntax.NewFileBase(pkgname), strings.NewReader(src), nil, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		config := &types2.Config{
+			Importer: imports,
+		}
+		return config.Check(pkgname, []*syntax.File{f}, nil)
+	}
+
+	// Use the resulting package concurrently, via dot-imports, to exercise the
+	// race of issue #69912.
+	const pSrc = `package p
+
+import . "issue69912"
+
+type S struct {
+	f T
+}
+`
+	importer := importMap{
+		"issue69912": issue69912,
+	}
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := check("p", pSrc, importer); err != nil {
+				t.Errorf("Check failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }

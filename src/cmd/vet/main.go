@@ -44,6 +44,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/unreachable"
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
 	"golang.org/x/tools/go/analysis/passes/unusedresult"
+	"golang.org/x/tools/go/analysis/passes/waitgroup"
 )
 
 func main() {
@@ -85,6 +86,7 @@ func main() {
 		unreachable.Analyzer,
 		unsafeptr.Analyzer,
 		unusedresult.Analyzer,
+		waitgroup.Analyzer,
 	)
 
 	// It's possible that unitchecker will exit early. In

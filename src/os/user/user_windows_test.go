@@ -14,16 +14,24 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"syscall"
 	"testing"
 	"unsafe"
 )
 
-// windowsTestAcount creates a test user and returns a token for that user.
+// windowsTestAccount creates a test user and returns a token for that user.
 // If the user already exists, it will be deleted and recreated.
 // The caller is responsible for closing the token.
-func windowsTestAcount(t *testing.T) (syscall.Token, *User) {
+func windowsTestAccount(t *testing.T) (syscall.Token, *User) {
+	if testenv.Builder() == "" {
+		// Adding and deleting users requires special permissions.
+		// Even if we have them, we don't want to create users on
+		// on dev machines, as they may not be cleaned up.
+		// See https://dev.go/issue/70396.
+		t.Skip("skipping non-hermetic test outside of Go builders")
+	}
 	const testUserName = "GoStdTestUser01"
 	var password [33]byte
 	rand.Read(password[:])
@@ -134,7 +142,7 @@ func TestImpersonated(t *testing.T) {
 	}
 
 	// Create a test user and log in as that user.
-	token, _ := windowsTestAcount(t)
+	token, _ := windowsTestAccount(t)
 
 	// Impersonate the test user.
 	if err = windows.ImpersonateLoggedOnUser(token); err != nil {
@@ -188,7 +196,7 @@ func TestCurrentNetapi32(t *testing.T) {
 
 func TestGroupIdsTestUser(t *testing.T) {
 	// Create a test user and log in as that user.
-	_, user := windowsTestAcount(t)
+	_, user := windowsTestAccount(t)
 
 	gids, err := user.GroupIds()
 	if err != nil {
@@ -198,7 +206,75 @@ func TestGroupIdsTestUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%+v.GroupIds(): %v", user, err)
 	}
-	if !containsID(gids, user.Gid) {
+	if !slices.Contains(gids, user.Gid) {
 		t.Errorf("%+v.GroupIds() = %v; does not contain user GID %s", user, gids, user.Gid)
+	}
+}
+
+var serviceAccounts = []struct {
+	sid  string
+	name string
+}{
+	{"S-1-5-18", "NT AUTHORITY\\SYSTEM"},
+	{"S-1-5-19", "NT AUTHORITY\\LOCAL SERVICE"},
+	{"S-1-5-20", "NT AUTHORITY\\NETWORK SERVICE"},
+}
+
+func TestLookupServiceAccount(t *testing.T) {
+	t.Parallel()
+	for _, tt := range serviceAccounts {
+		u, err := Lookup(tt.name)
+		if err != nil {
+			t.Errorf("Lookup(%q): %v", tt.name, err)
+			continue
+		}
+		if u.Uid != tt.sid {
+			t.Errorf("unexpected uid for %q; got %q, want %q", u.Name, u.Uid, tt.sid)
+		}
+	}
+}
+
+func TestLookupIdServiceAccount(t *testing.T) {
+	t.Parallel()
+	for _, tt := range serviceAccounts {
+		u, err := LookupId(tt.sid)
+		if err != nil {
+			t.Errorf("LookupId(%q): %v", tt.sid, err)
+			continue
+		}
+		if u.Gid != tt.sid {
+			t.Errorf("unexpected gid for %q; got %q, want %q", u.Name, u.Gid, tt.sid)
+		}
+		if u.Username != tt.name {
+			t.Errorf("unexpected user name for %q; got %q, want %q", u.Gid, u.Username, tt.name)
+		}
+	}
+}
+
+func TestLookupGroupServiceAccount(t *testing.T) {
+	t.Parallel()
+	for _, tt := range serviceAccounts {
+		u, err := LookupGroup(tt.name)
+		if err != nil {
+			t.Errorf("LookupGroup(%q): %v", tt.name, err)
+			continue
+		}
+		if u.Gid != tt.sid {
+			t.Errorf("unexpected gid for %q; got %q, want %q", u.Name, u.Gid, tt.sid)
+		}
+	}
+}
+
+func TestLookupGroupIdServiceAccount(t *testing.T) {
+	t.Parallel()
+	for _, tt := range serviceAccounts {
+		u, err := LookupGroupId(tt.sid)
+		if err != nil {
+			t.Errorf("LookupGroupId(%q): %v", tt.sid, err)
+			continue
+		}
+		if u.Gid != tt.sid {
+			t.Errorf("unexpected gid for %q; got %q, want %q", u.Name, u.Gid, tt.sid)
+		}
 	}
 }

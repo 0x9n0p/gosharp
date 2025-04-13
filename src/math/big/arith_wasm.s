@@ -18,15 +18,15 @@ TEXT ·addVW(SB),NOSPLIT,$0
 TEXT ·subVW(SB),NOSPLIT,$0
 	JMP ·subVW_g(SB)
 
-TEXT ·shlVU(SB),NOSPLIT,$0
-	JMP ·shlVU_g(SB)
+TEXT ·lshVU(SB),NOSPLIT,$0
+	JMP ·lshVU_g(SB)
 
-TEXT ·shrVU(SB),NOSPLIT,$0
-	JMP ·shrVU_g(SB)
+TEXT ·rshVU(SB),NOSPLIT,$0
+	JMP ·rshVU_g(SB)
 
 TEXT ·mulAddVWW(SB),NOSPLIT,$0
 	JMP ·mulAddVWW_g(SB)
 
-TEXT ·addMulVVW(SB),NOSPLIT,$0
-	JMP ·addMulVVW_g(SB)
+TEXT ·addMulVVWW(SB),NOSPLIT,$0
+	JMP ·addMulVVWW_g(SB)
 

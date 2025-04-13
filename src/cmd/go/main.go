@@ -71,11 +71,13 @@ func init() {
 		vet.CmdVet,
 
 		help.HelpBuildConstraint,
+		help.HelpBuildJSON,
 		help.HelpBuildmode,
 		help.HelpC,
 		help.HelpCache,
 		help.HelpEnvironment,
 		help.HelpFileType,
+		help.HelpGoAuth,
 		modload.HelpGoMod,
 		help.HelpGopath,
 		modfetch.HelpGoproxy,
@@ -151,7 +153,7 @@ func main() {
 	// This setting is equivalent to not setting GOPATH at all,
 	// which is not what most people want when they do it.
 	if gopath := cfg.BuildContext.GOPATH; filepath.Clean(gopath) == filepath.Clean(cfg.GOROOT) {
-		fmt.Fprintf(os.Stderr, "warning: GOPATH set to GOROOT (%s) has no effect\n", gopath)
+		fmt.Fprintf(os.Stderr, "warning: both GOPATH and GOROOT are the same directory (%s); see https://go.dev/wiki/InstallTroubleshooting\n", gopath)
 	} else {
 		for _, p := range filepath.SplitList(gopath) {
 			// Some GOPATHs have empty directory elements - ignore them.
@@ -219,7 +221,7 @@ func main() {
 	base.Exit()
 }
 
-// cmdIsGoTelemeteryOff reports whether the command is "go telemetry off". This
+// cmdIsGoTelemetryOff reports whether the command is "go telemetry off". This
 // is used to decide whether to disable the opening of counter files. See #69269.
 func cmdIsGoTelemetryOff() bool {
 	restArgs := os.Args[1:]

@@ -309,6 +309,7 @@ type dbgVar struct {
 var debug struct {
 	cgocheck                 int32
 	clobberfree              int32
+	decoratemappings         int32
 	disablethp               int32
 	dontfreezetheworld       int32
 	efence                   int32
@@ -331,6 +332,7 @@ var debug struct {
 	traceadvanceperiod       int32
 	traceCheckStackOwnership int32
 	profstackdepth           int32
+	dataindependenttiming    int32
 
 	// debug.malloc is used as a combined debug check
 	// in the malloc function and should be set
@@ -367,6 +369,8 @@ var dbgvars = []*dbgVar{
 	{name: "asynctimerchan", atomic: &debug.asynctimerchan},
 	{name: "cgocheck", value: &debug.cgocheck},
 	{name: "clobberfree", value: &debug.clobberfree},
+	{name: "dataindependenttiming", value: &debug.dataindependenttiming},
+	{name: "decoratemappings", value: &debug.decoratemappings, def: 1},
 	{name: "disablethp", value: &debug.disablethp},
 	{name: "dontfreezetheworld", value: &debug.dontfreezetheworld},
 	{name: "efence", value: &debug.efence},
@@ -437,6 +441,23 @@ func parsedebugvars() {
 
 	debug.malloc = (debug.inittrace | debug.sbrk) != 0
 	debug.profstackdepth = min(debug.profstackdepth, maxProfStackDepth)
+
+	// Disable async preemption in checkmark mode. The following situation is
+	// problematic with checkmark mode:
+	//
+	// - The GC doesn't mark object A because it is truly dead.
+	// - The GC stops the world, asynchronously preempting G1 which has a reference
+	//   to A in its top stack frame
+	// - During the stop the world, we run the second checkmark GC. It marks the roots
+	//   and discovers A through G1.
+	// - Checkmark mode reports a failure since there's a discrepancy in mark metadata.
+	//
+	// We could disable just conservative scanning during the checkmark scan, which is
+	// safe but makes checkmark slightly less powerful, but that's a lot more invasive
+	// than just disabling async preemption altogether.
+	if debug.gccheckmark > 0 {
+		debug.asyncpreemptoff = 1
+	}
 
 	setTraceback(gogetenv("GOTRACEBACK"))
 	traceback_env = traceback_cache
@@ -723,4 +744,14 @@ func reflect_addReflectOff(ptr unsafe.Pointer) int32 {
 	}
 	reflectOffsUnlock()
 	return id
+}
+
+//go:linkname fips_getIndicator crypto/internal/fips140.getIndicator
+func fips_getIndicator() uint8 {
+	return getg().fipsIndicator
+}
+
+//go:linkname fips_setIndicator crypto/internal/fips140.setIndicator
+func fips_setIndicator(indicator uint8) {
+	getg().fipsIndicator = indicator
 }

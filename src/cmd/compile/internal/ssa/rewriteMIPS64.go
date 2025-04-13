@@ -2802,6 +2802,19 @@ func rewriteValueMIPS64_OpMIPS64MOVBUload(v *Value) bool {
 		v.AddArg2(ptr, mem)
 		return true
 	}
+	// match: (MOVBUload [off] {sym} (SB) _)
+	// cond: symIsRO(sym)
+	// result: (MOVVconst [int64(read8(sym, int64(off)))])
+	for {
+		off := auxIntToInt32(v.AuxInt)
+		sym := auxToSym(v.Aux)
+		if v_0.Op != OpSB || !(symIsRO(sym)) {
+			break
+		}
+		v.reset(OpMIPS64MOVVconst)
+		v.AuxInt = int64ToAuxInt(int64(read8(sym, int64(off))))
+		return true
+	}
 	return false
 }
 func rewriteValueMIPS64_OpMIPS64MOVBUreg(v *Value) bool {
@@ -2891,7 +2904,7 @@ func rewriteValueMIPS64_OpMIPS64MOVBload(v *Value) bool {
 	}
 	// match: (MOVBload [off] {sym} (SB) _)
 	// cond: symIsRO(sym)
-	// result: (MOVVconst [int64(read8(sym, int64(off)))])
+	// result: (MOVVconst [int64(int8(read8(sym, int64(off))))])
 	for {
 		off := auxIntToInt32(v.AuxInt)
 		sym := auxToSym(v.Aux)
@@ -2899,7 +2912,7 @@ func rewriteValueMIPS64_OpMIPS64MOVBload(v *Value) bool {
 			break
 		}
 		v.reset(OpMIPS64MOVVconst)
-		v.AuxInt = int64ToAuxInt(int64(read8(sym, int64(off))))
+		v.AuxInt = int64ToAuxInt(int64(int8(read8(sym, int64(off)))))
 		return true
 	}
 	return false
@@ -3484,6 +3497,19 @@ func rewriteValueMIPS64_OpMIPS64MOVHUload(v *Value) bool {
 		v.AddArg2(ptr, mem)
 		return true
 	}
+	// match: (MOVHUload [off] {sym} (SB) _)
+	// cond: symIsRO(sym)
+	// result: (MOVVconst [int64(read16(sym, int64(off), config.ctxt.Arch.ByteOrder))])
+	for {
+		off := auxIntToInt32(v.AuxInt)
+		sym := auxToSym(v.Aux)
+		if v_0.Op != OpSB || !(symIsRO(sym)) {
+			break
+		}
+		v.reset(OpMIPS64MOVVconst)
+		v.AuxInt = int64ToAuxInt(int64(read16(sym, int64(off), config.ctxt.Arch.ByteOrder)))
+		return true
+	}
 	return false
 }
 func rewriteValueMIPS64_OpMIPS64MOVHUreg(v *Value) bool {
@@ -3595,7 +3621,7 @@ func rewriteValueMIPS64_OpMIPS64MOVHload(v *Value) bool {
 	}
 	// match: (MOVHload [off] {sym} (SB) _)
 	// cond: symIsRO(sym)
-	// result: (MOVVconst [int64(read16(sym, int64(off), config.ctxt.Arch.ByteOrder))])
+	// result: (MOVVconst [int64(int16(read16(sym, int64(off), config.ctxt.Arch.ByteOrder)))])
 	for {
 		off := auxIntToInt32(v.AuxInt)
 		sym := auxToSym(v.Aux)
@@ -3603,7 +3629,7 @@ func rewriteValueMIPS64_OpMIPS64MOVHload(v *Value) bool {
 			break
 		}
 		v.reset(OpMIPS64MOVVconst)
-		v.AuxInt = int64ToAuxInt(int64(read16(sym, int64(off), config.ctxt.Arch.ByteOrder)))
+		v.AuxInt = int64ToAuxInt(int64(int16(read16(sym, int64(off), config.ctxt.Arch.ByteOrder))))
 		return true
 	}
 	return false
@@ -4202,6 +4228,19 @@ func rewriteValueMIPS64_OpMIPS64MOVWUload(v *Value) bool {
 		v.AddArg2(ptr, mem)
 		return true
 	}
+	// match: (MOVWUload [off] {sym} (SB) _)
+	// cond: symIsRO(sym)
+	// result: (MOVVconst [int64(read32(sym, int64(off), config.ctxt.Arch.ByteOrder))])
+	for {
+		off := auxIntToInt32(v.AuxInt)
+		sym := auxToSym(v.Aux)
+		if v_0.Op != OpSB || !(symIsRO(sym)) {
+			break
+		}
+		v.reset(OpMIPS64MOVVconst)
+		v.AuxInt = int64ToAuxInt(int64(read32(sym, int64(off), config.ctxt.Arch.ByteOrder)))
+		return true
+	}
 	return false
 }
 func rewriteValueMIPS64_OpMIPS64MOVWUreg(v *Value) bool {
@@ -4335,7 +4374,7 @@ func rewriteValueMIPS64_OpMIPS64MOVWload(v *Value) bool {
 	}
 	// match: (MOVWload [off] {sym} (SB) _)
 	// cond: symIsRO(sym)
-	// result: (MOVVconst [int64(read32(sym, int64(off), config.ctxt.Arch.ByteOrder))])
+	// result: (MOVVconst [int64(int32(read32(sym, int64(off), config.ctxt.Arch.ByteOrder)))])
 	for {
 		off := auxIntToInt32(v.AuxInt)
 		sym := auxToSym(v.Aux)
@@ -4343,7 +4382,7 @@ func rewriteValueMIPS64_OpMIPS64MOVWload(v *Value) bool {
 			break
 		}
 		v.reset(OpMIPS64MOVVconst)
-		v.AuxInt = int64ToAuxInt(int64(read32(sym, int64(off), config.ctxt.Arch.ByteOrder)))
+		v.AuxInt = int64ToAuxInt(int64(int32(read32(sym, int64(off), config.ctxt.Arch.ByteOrder))))
 		return true
 	}
 	return false
@@ -6004,7 +6043,7 @@ func rewriteValueMIPS64_OpMove(v *Value) bool {
 		return true
 	}
 	// match: (Move [s] {t} dst src mem)
-	// cond: s%8 == 0 && s >= 24 && s <= 8*128 && t.Alignment()%8 == 0 && !config.noDuffDevice && logLargeCopy(v, s)
+	// cond: s%8 == 0 && s >= 24 && s <= 8*128 && t.Alignment()%8 == 0 && logLargeCopy(v, s)
 	// result: (DUFFCOPY [16 * (128 - s/8)] dst src mem)
 	for {
 		s := auxIntToInt64(v.AuxInt)
@@ -6012,7 +6051,7 @@ func rewriteValueMIPS64_OpMove(v *Value) bool {
 		dst := v_0
 		src := v_1
 		mem := v_2
-		if !(s%8 == 0 && s >= 24 && s <= 8*128 && t.Alignment()%8 == 0 && !config.noDuffDevice && logLargeCopy(v, s)) {
+		if !(s%8 == 0 && s >= 24 && s <= 8*128 && t.Alignment()%8 == 0 && logLargeCopy(v, s)) {
 			break
 		}
 		v.reset(OpMIPS64DUFFCOPY)
@@ -8161,14 +8200,14 @@ func rewriteValueMIPS64_OpZero(v *Value) bool {
 		return true
 	}
 	// match: (Zero [s] {t} ptr mem)
-	// cond: s%8 == 0 && s > 24 && s <= 8*128 && t.Alignment()%8 == 0 && !config.noDuffDevice
+	// cond: s%8 == 0 && s > 24 && s <= 8*128 && t.Alignment()%8 == 0
 	// result: (DUFFZERO [8 * (128 - s/8)] ptr mem)
 	for {
 		s := auxIntToInt64(v.AuxInt)
 		t := auxToType(v.Aux)
 		ptr := v_0
 		mem := v_1
-		if !(s%8 == 0 && s > 24 && s <= 8*128 && t.Alignment()%8 == 0 && !config.noDuffDevice) {
+		if !(s%8 == 0 && s > 24 && s <= 8*128 && t.Alignment()%8 == 0) {
 			break
 		}
 		v.reset(OpMIPS64DUFFZERO)
@@ -8177,14 +8216,14 @@ func rewriteValueMIPS64_OpZero(v *Value) bool {
 		return true
 	}
 	// match: (Zero [s] {t} ptr mem)
-	// cond: (s > 8*128 || config.noDuffDevice) || t.Alignment()%8 != 0
+	// cond: s > 8*128 || t.Alignment()%8 != 0
 	// result: (LoweredZero [t.Alignment()] ptr (ADDVconst <ptr.Type> ptr [s-moveSize(t.Alignment(), config)]) mem)
 	for {
 		s := auxIntToInt64(v.AuxInt)
 		t := auxToType(v.Aux)
 		ptr := v_0
 		mem := v_1
-		if !((s > 8*128 || config.noDuffDevice) || t.Alignment()%8 != 0) {
+		if !(s > 8*128 || t.Alignment()%8 != 0) {
 			break
 		}
 		v.reset(OpMIPS64LoweredZero)

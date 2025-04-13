@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"cmd/internal/cov/covcmd"
+	"cmd/internal/par"
 	"container/heap"
 	"context"
 	"debug/elf"
@@ -56,9 +57,10 @@ type Builder struct {
 	readySema chan bool
 	ready     actionQueue
 
-	id           sync.Mutex
-	toolIDCache  map[string]string // tool name -> tool ID
-	buildIDCache map[string]string // file name -> build ID
+	id             sync.Mutex
+	toolIDCache    par.Cache[string, string] // tool name -> tool ID
+	gccToolIDCache map[string]string         // tool name -> tool ID
+	buildIDCache   map[string]string         // file name -> build ID
 }
 
 // NOTE: Much of Action would not need to be exported if not for test.
@@ -92,6 +94,8 @@ type Action struct {
 
 	TryCache func(*Builder, *Action) bool // callback for cache bypass
 
+	CacheExecutable bool // Whether to cache executables produced by link steps
+
 	// Generated files, directories.
 	Objdir   string         // directory for intermediate objects
 	Target   string         // goal of the action: the created package or executable
@@ -110,7 +114,7 @@ type Action struct {
 	// Execution state.
 	pending      int               // number of deps yet to complete
 	priority     int               // relative execution priority
-	Failed       bool              // whether the action failed
+	Failed       *Action           // set to root cause if the action failed
 	json         *actionJSON       // action graph information
 	nonGoOverlay map[string]string // map from non-.go source files to copied files in objdir. Nil if no overlay is used.
 	traceSpan    *trace.Span
@@ -218,7 +222,7 @@ func actionGraphJSON(a *Action) string {
 				Args:       a.Args,
 				Objdir:     a.Objdir,
 				Target:     a.Target,
-				Failed:     a.Failed,
+				Failed:     a.Failed != nil,
 				Priority:   a.priority,
 				Built:      a.built,
 				VetxOnly:   a.VetxOnly,
@@ -266,9 +270,10 @@ func NewBuilder(workDir string) *Builder {
 	b := new(Builder)
 
 	b.actionCache = make(map[cacheKey]*Action)
-	b.toolIDCache = make(map[string]string)
+	b.gccToolIDCache = make(map[string]string)
 	b.buildIDCache = make(map[string]string)
 
+	printWorkDir := false
 	if workDir != "" {
 		b.WorkDir = workDir
 	} else if cfg.BuildN {
@@ -291,12 +296,14 @@ func NewBuilder(workDir string) *Builder {
 		}
 		b.WorkDir = tmp
 		builderWorkDirs.Store(b, b.WorkDir)
-		if cfg.BuildX || cfg.BuildWork {
-			fmt.Fprintf(os.Stderr, "WORK=%s\n", b.WorkDir)
-		}
+		printWorkDir = cfg.BuildX || cfg.BuildWork
 	}
 
 	b.backgroundSh = NewShell(b.WorkDir, nil)
+
+	if printWorkDir {
+		b.BackgroundShell().Printf("WORK=%s\n", b.WorkDir)
+	}
 
 	if err := CheckGOOSARCHPair(cfg.Goos, cfg.Goarch); err != nil {
 		fmt.Fprintf(os.Stderr, "go: %v\n", err)

@@ -8,6 +8,7 @@ import (
 	"internal/abi"
 	"internal/chacha8rand"
 	"internal/goarch"
+	"internal/goexperiment"
 	"internal/runtime/atomic"
 	"internal/runtime/sys"
 	"unsafe"
@@ -311,7 +312,6 @@ type gobuf struct {
 	pc   uintptr
 	g    guintptr
 	ctxt unsafe.Pointer
-	ret  uintptr
 	lr   uintptr
 	bp   uintptr // for framepointer-enabled architectures
 }
@@ -466,6 +466,7 @@ type g struct {
 	trackingStamp int64 // timestamp of when the G last started being tracked
 	runnableTime  int64 // the amount of time spent runnable, cleared when running, only used when tracking
 	lockedm       muintptr
+	fipsIndicator uint8
 	sig           uint32
 	writebuf      []byte
 	sigcode0      uintptr
@@ -487,7 +488,8 @@ type g struct {
 	// current in-progress goroutine profile
 	goroutineProfiled goroutineProfileStateHolder
 
-	coroarg *coro // argument during coroutine transfers
+	coroarg   *coro // argument during coroutine transfers
+	syncGroup *synctestGroup
 
 	// Per-G tracer state.
 	trace gTraceState
@@ -525,51 +527,51 @@ const (
 type m struct {
 	g0      *g     // goroutine with scheduling stack
 	morebuf gobuf  // gobuf arg to morestack
-	divmod  uint32 // div/mod denominator for arm - known to liblink
-	_       uint32 // align next field to 8 bytes
+	divmod  uint32 // div/mod denominator for arm - known to liblink (cmd/internal/obj/arm/obj5.go)
 
 	// Fields not known to debuggers.
-	procid        uint64            // for debuggers, but offset not hard-coded
-	gsignal       *g                // signal-handling g
-	goSigStack    gsignalStack      // Go-allocated signal handling stack
-	sigmask       sigset            // storage for saved signal mask
-	tls           [tlsSlots]uintptr // thread-local storage (for x86 extern register)
-	mstartfn      func()
-	curg          *g       // current running goroutine
-	caughtsig     guintptr // goroutine running during fatal signal
-	p             puintptr // attached p for executing go code (nil if not executing go code)
-	nextp         puintptr
-	oldp          puintptr // the p that was attached before executing a syscall
-	id            int64
-	mallocing     int32
-	throwing      throwType
-	preemptoff    string // if != "", keep curg running on this m
-	locks         int32
-	dying         int32
-	profilehz     int32
-	spinning      bool // m is out of work and is actively looking for work
-	blocked       bool // m is blocked on a note
-	newSigstack   bool // minit on C thread called sigaltstack
-	printlock     int8
-	incgo         bool          // m is executing a cgo call
-	isextra       bool          // m is an extra m
-	isExtraInC    bool          // m is an extra m that is not executing Go code
-	isExtraInSig  bool          // m is an extra m in a signal handler
-	freeWait      atomic.Uint32 // Whether it is safe to free g0 and delete m (one of freeMRef, freeMStack, freeMWait)
-	needextram    bool
-	traceback     uint8
-	ncgocall      uint64        // number of cgo calls in total
-	ncgo          int32         // number of cgo calls currently in progress
-	cgoCallersUse atomic.Uint32 // if non-zero, cgoCallers in use temporarily
-	cgoCallers    *cgoCallers   // cgo traceback if crashing in cgo call
-	park          note
-	alllink       *m // on allm
-	schedlink     muintptr
-	lockedg       guintptr
-	createstack   [32]uintptr // stack that created this thread, it's used for StackRecord.Stack0, so it must align with it.
-	lockedExt     uint32      // tracking for external LockOSThread
-	lockedInt     uint32      // tracking for internal lockOSThread
-	nextwaitm     muintptr    // next m waiting for lock
+	procid          uint64            // for debuggers, but offset not hard-coded
+	gsignal         *g                // signal-handling g
+	goSigStack      gsignalStack      // Go-allocated signal handling stack
+	sigmask         sigset            // storage for saved signal mask
+	tls             [tlsSlots]uintptr // thread-local storage (for x86 extern register)
+	mstartfn        func()
+	curg            *g       // current running goroutine
+	caughtsig       guintptr // goroutine running during fatal signal
+	p               puintptr // attached p for executing go code (nil if not executing go code)
+	nextp           puintptr
+	oldp            puintptr // the p that was attached before executing a syscall
+	id              int64
+	mallocing       int32
+	throwing        throwType
+	preemptoff      string // if != "", keep curg running on this m
+	locks           int32
+	dying           int32
+	profilehz       int32
+	spinning        bool // m is out of work and is actively looking for work
+	blocked         bool // m is blocked on a note
+	newSigstack     bool // minit on C thread called sigaltstack
+	printlock       int8
+	incgo           bool          // m is executing a cgo call
+	isextra         bool          // m is an extra m
+	isExtraInC      bool          // m is an extra m that does not have any Go frames
+	isExtraInSig    bool          // m is an extra m in a signal handler
+	freeWait        atomic.Uint32 // Whether it is safe to free g0 and delete m (one of freeMRef, freeMStack, freeMWait)
+	needextram      bool
+	g0StackAccurate bool // whether the g0 stack has accurate bounds
+	traceback       uint8
+	ncgocall        uint64        // number of cgo calls in total
+	ncgo            int32         // number of cgo calls currently in progress
+	cgoCallersUse   atomic.Uint32 // if non-zero, cgoCallers in use temporarily
+	cgoCallers      *cgoCallers   // cgo traceback if crashing in cgo call
+	park            note
+	alllink         *m // on allm
+	schedlink       muintptr
+	lockedg         guintptr
+	createstack     [32]uintptr // stack that created this thread, it's used for StackRecord.Stack0, so it must align with it.
+	lockedExt       uint32      // tracking for external LockOSThread
+	lockedInt       uint32      // tracking for internal lockOSThread
+	mWaitList       mWaitList   // list of runtime lock waiters
 
 	mLockProfile mLockProfile // fields relating to runtime.lock contention
 	profStack    []uintptr    // used for memory/block/mutex stack traces
@@ -617,6 +619,18 @@ type m struct {
 	// Up to 10 locks held by this m, maintained by the lock ranking code.
 	locksHeldLen int
 	locksHeld    [10]heldLockInfo
+}
+
+const mRedZoneSize = (16 << 3) * asanenabledBit // redZoneSize(2048)
+
+type mPadded struct {
+	m
+
+	// Size the runtime.m structure so it fits in the 2048-byte size class, and
+	// not in the next-smallest (1792-byte) size class. That leaves the 11 low
+	// bits of muintptr values available for flags, as required for
+	// GOEXPERIMENT=spinbitmutex.
+	_ [goexperiment.SpinbitMutexInt * (2048 - mallocHeaderSize - mRedZoneSize - unsafe.Sizeof(m{}))]byte
 }
 
 type p struct {
@@ -1006,6 +1020,7 @@ type _panic struct {
 	slotsPtr     unsafe.Pointer
 
 	recovered   bool // whether this panic has been recovered
+	reraised    bool // whether this panic was reraised
 	goexit      bool
 	deferreturn bool
 }
@@ -1055,6 +1070,7 @@ const (
 	waitReasonSyncMutexLock                           // "sync.Mutex.Lock"
 	waitReasonSyncRWMutexRLock                        // "sync.RWMutex.RLock"
 	waitReasonSyncRWMutexLock                         // "sync.RWMutex.Lock"
+	waitReasonSyncWaitGroupWait                       // "sync.WaitGroup.Wait"
 	waitReasonTraceReaderBlocked                      // "trace reader (blocked)"
 	waitReasonWaitForGCCycle                          // "wait for GC cycle"
 	waitReasonGCWorkerIdle                            // "GC worker (idle)"
@@ -1068,6 +1084,12 @@ const (
 	waitReasonTraceProcStatus                         // "trace proc status"
 	waitReasonPageTraceFlush                          // "page trace flush"
 	waitReasonCoroutine                               // "coroutine"
+	waitReasonGCWeakToStrongWait                      // "GC weak to strong wait"
+	waitReasonSynctestRun                             // "synctest.Run"
+	waitReasonSynctestWait                            // "synctest.Wait"
+	waitReasonSynctestChanReceive                     // "chan receive (synctest)"
+	waitReasonSynctestChanSend                        // "chan send (synctest)"
+	waitReasonSynctestSelect                          // "select (synctest)"
 )
 
 var waitReasonStrings = [...]string{
@@ -1095,6 +1117,7 @@ var waitReasonStrings = [...]string{
 	waitReasonSyncMutexLock:         "sync.Mutex.Lock",
 	waitReasonSyncRWMutexRLock:      "sync.RWMutex.RLock",
 	waitReasonSyncRWMutexLock:       "sync.RWMutex.Lock",
+	waitReasonSyncWaitGroupWait:     "sync.WaitGroup.Wait",
 	waitReasonTraceReaderBlocked:    "trace reader (blocked)",
 	waitReasonWaitForGCCycle:        "wait for GC cycle",
 	waitReasonGCWorkerIdle:          "GC worker (idle)",
@@ -1108,6 +1131,12 @@ var waitReasonStrings = [...]string{
 	waitReasonTraceProcStatus:       "trace proc status",
 	waitReasonPageTraceFlush:        "page trace flush",
 	waitReasonCoroutine:             "coroutine",
+	waitReasonGCWeakToStrongWait:    "GC weak to strong wait",
+	waitReasonSynctestRun:           "synctest.Run",
+	waitReasonSynctestWait:          "synctest.Wait",
+	waitReasonSynctestChanReceive:   "chan receive (synctest)",
+	waitReasonSynctestChanSend:      "chan send (synctest)",
+	waitReasonSynctestSelect:        "select (synctest)",
 }
 
 func (w waitReason) String() string {
@@ -1144,6 +1173,26 @@ var isWaitingForGC = [len(waitReasonStrings)]bool{
 	waitReasonGCAssistMarking:       true,
 	waitReasonGCWorkerActive:        true,
 	waitReasonFlushProcCaches:       true,
+}
+
+func (w waitReason) isIdleInSynctest() bool {
+	return isIdleInSynctest[w]
+}
+
+// isIdleInSynctest indicates that a goroutine is considered idle by synctest.Wait.
+var isIdleInSynctest = [len(waitReasonStrings)]bool{
+	waitReasonChanReceiveNilChan:  true,
+	waitReasonChanSendNilChan:     true,
+	waitReasonSelectNoCases:       true,
+	waitReasonSleep:               true,
+	waitReasonSyncCondWait:        true,
+	waitReasonSyncWaitGroupWait:   true,
+	waitReasonCoroutine:           true,
+	waitReasonSynctestRun:         true,
+	waitReasonSynctestWait:        true,
+	waitReasonSynctestChanReceive: true,
+	waitReasonSynctestChanSend:    true,
+	waitReasonSynctestSelect:      true,
 }
 
 var (

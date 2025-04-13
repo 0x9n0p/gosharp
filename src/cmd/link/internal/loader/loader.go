@@ -432,16 +432,16 @@ func (st *loadState) addSym(name string, ver int, r *oReader, li uint32, kind in
 		return i
 	}
 	// symbol already exists
+	// Fix for issue #47185 -- given two dupok or BSS symbols with
+	// different sizes, favor symbol with larger size. See also
+	// issue #46653 and #72032.
+	oldsz := l.SymSize(oldi)
+	sz := int64(r.Sym(li).Siz())
 	if osym.Dupok() {
 		if l.flags&FlagStrictDups != 0 {
 			l.checkdup(name, r, li, oldi)
 		}
-		// Fix for issue #47185 -- given two dupok symbols with
-		// different sizes, favor symbol with larger size. See
-		// also issue #46653.
-		szdup := l.SymSize(oldi)
-		sz := int64(r.Sym(li).Siz())
-		if szdup < sz {
+		if oldsz < sz {
 			// new symbol overwrites old symbol.
 			l.objSyms[oldi] = objSym{r.objidx, li}
 		}
@@ -452,11 +452,24 @@ func (st *loadState) addSym(name string, ver int, r *oReader, li uint32, kind in
 	if oldsym.Dupok() {
 		return oldi
 	}
-	overwrite := r.DataSize(li) != 0
+	// If one is a DATA symbol (i.e. has content, DataSize != 0)
+	// and the other is BSS, the one with content wins.
+	// If both are BSS, the one with larger size wins.
+	// Specifically, the "overwrite" variable and the final result are
+	//
+	// new sym       old sym       overwrite
+	// ---------------------------------------------
+	// DATA          DATA          true  => ERROR
+	// DATA lg/eq    BSS  sm/eq    true  => new wins
+	// DATA small    BSS  large    true  => ERROR
+	// BSS  large    DATA small    true  => ERROR
+	// BSS  large    BSS  small    true  => new wins
+	// BSS  sm/eq    D/B  lg/eq    false => old wins
+	overwrite := r.DataSize(li) != 0 || oldsz < sz
 	if overwrite {
 		// new symbol overwrites old symbol.
 		oldtyp := sym.AbiSymKindToSymKind[objabi.SymKind(oldsym.Type())]
-		if !(oldtyp.IsData() && oldr.DataSize(oldli) == 0) {
+		if !(oldtyp.IsData() && oldr.DataSize(oldli) == 0) || oldsz > sz {
 			log.Fatalf("duplicated definition of symbol %s, from %s and %s", name, r.unit.Lib.Pkg, oldr.unit.Lib.Pkg)
 		}
 		l.objSyms[oldi] = objSym{r.objidx, li}
@@ -1623,7 +1636,7 @@ func (l *Loader) Aux(i Sym, j int) Aux {
 // import statement.
 // (https://webassembly.github.io/spec/core/syntax/modules.html#imports)
 func (l *Loader) WasmImportSym(fnSymIdx Sym) Sym {
-	if l.SymType(fnSymIdx) != sym.STEXT {
+	if !l.SymType(fnSymIdx).IsText() {
 		log.Fatalf("error: non-function sym %d/%s t=%s passed to WasmImportSym", fnSymIdx, l.SymName(fnSymIdx), l.SymType(fnSymIdx).String())
 	}
 	return l.aux1(fnSymIdx, goobj.AuxWasmImport)
@@ -1636,7 +1649,7 @@ func (l *Loader) WasmTypeSym(s Sym) Sym {
 // SEHUnwindSym returns the auxiliary SEH unwind symbol associated with
 // a given function symbol.
 func (l *Loader) SEHUnwindSym(fnSymIdx Sym) Sym {
-	if l.SymType(fnSymIdx) != sym.STEXT {
+	if !l.SymType(fnSymIdx).IsText() {
 		log.Fatalf("error: non-function sym %d/%s t=%s passed to SEHUnwindSym", fnSymIdx, l.SymName(fnSymIdx), l.SymType(fnSymIdx).String())
 	}
 
@@ -1649,7 +1662,7 @@ func (l *Loader) SEHUnwindSym(fnSymIdx Sym) Sym {
 // lookups, e.f. for function with name XYZ we would then look up
 // go.info.XYZ, etc.
 func (l *Loader) GetFuncDwarfAuxSyms(fnSymIdx Sym) (auxDwarfInfo, auxDwarfLoc, auxDwarfRanges, auxDwarfLines Sym) {
-	if l.SymType(fnSymIdx) != sym.STEXT {
+	if !l.SymType(fnSymIdx).IsText() {
 		log.Fatalf("error: non-function sym %d/%s t=%s passed to GetFuncDwarfAuxSyms", fnSymIdx, l.SymName(fnSymIdx), l.SymType(fnSymIdx).String())
 	}
 	r, auxs := l.auxs(fnSymIdx)
@@ -2336,9 +2349,47 @@ var blockedLinknames = map[string][]string{
 	// coroutines
 	"runtime.coroswitch": {"iter"},
 	"runtime.newcoro":    {"iter"},
-	// weak references
-	"internal/weak.runtime_registerWeakPointer": {"internal/weak"},
-	"internal/weak.runtime_makeStrongFromWeak":  {"internal/weak"},
+	// fips info
+	"go:fipsinfo": {"crypto/internal/fips140/check"},
+	// New internal linknames in Go 1.24
+	// Pushed from runtime
+	"crypto/internal/fips140.fatal":         {"crypto/internal/fips140"},
+	"crypto/internal/fips140.getIndicator":  {"crypto/internal/fips140"},
+	"crypto/internal/fips140.setIndicator":  {"crypto/internal/fips140"},
+	"crypto/internal/sysrand.fatal":         {"crypto/internal/sysrand"},
+	"crypto/rand.fatal":                     {"crypto/rand"},
+	"internal/runtime/maps.errNilAssign":    {"internal/runtime/maps"},
+	"internal/runtime/maps.fatal":           {"internal/runtime/maps"},
+	"internal/runtime/maps.mapKeyError":     {"internal/runtime/maps"},
+	"internal/runtime/maps.newarray":        {"internal/runtime/maps"},
+	"internal/runtime/maps.newobject":       {"internal/runtime/maps"},
+	"internal/runtime/maps.typedmemclr":     {"internal/runtime/maps"},
+	"internal/runtime/maps.typedmemmove":    {"internal/runtime/maps"},
+	"internal/sync.fatal":                   {"internal/sync"},
+	"internal/sync.runtime_canSpin":         {"internal/sync"},
+	"internal/sync.runtime_doSpin":          {"internal/sync"},
+	"internal/sync.runtime_nanotime":        {"internal/sync"},
+	"internal/sync.runtime_Semrelease":      {"internal/sync"},
+	"internal/sync.runtime_SemacquireMutex": {"internal/sync"},
+	"internal/sync.throw":                   {"internal/sync"},
+	"internal/synctest.Run":                 {"internal/synctest"},
+	"internal/synctest.Wait":                {"internal/synctest"},
+	"internal/synctest.acquire":             {"internal/synctest"},
+	"internal/synctest.release":             {"internal/synctest"},
+	"internal/synctest.inBubble":            {"internal/synctest"},
+	"runtime.getStaticuint64s":              {"reflect"},
+	"sync.runtime_SemacquireWaitGroup":      {"sync"},
+	"time.runtimeNow":                       {"time"},
+	"time.runtimeNano":                      {"time"},
+	// Pushed to runtime from internal/runtime/maps
+	// (other map functions are already linknamed in Go 1.23)
+	"runtime.mapaccess1":         {"runtime"},
+	"runtime.mapaccess1_fast32":  {"runtime"},
+	"runtime.mapaccess1_fast64":  {"runtime"},
+	"runtime.mapaccess1_faststr": {"runtime"},
+	"runtime.mapdelete_fast32":   {"runtime"},
+	"runtime.mapdelete_fast64":   {"runtime"},
+	"runtime.mapdelete_faststr":  {"runtime"},
 }
 
 // check if a linkname reference to symbol s from pkg is allowed
@@ -2355,6 +2406,16 @@ func (l *Loader) checkLinkname(pkg, name string, s Sym) {
 		for _, p := range pkgs {
 			if pkg == p {
 				return // pkg is allowed
+			}
+			// crypto/internal/fips140/vX.Y.Z/... is the frozen version of
+			// crypto/internal/fips140/... and is similarly allowed.
+			if strings.HasPrefix(pkg, "crypto/internal/fips140/v") {
+				parts := strings.Split(pkg, "/")
+				parts = append(parts[:3], parts[4:]...)
+				pkg := strings.Join(parts, "/")
+				if pkg == p {
+					return
+				}
 			}
 		}
 		error()
@@ -2609,7 +2670,7 @@ func (l *Loader) AssignTextSymbolOrder(libs []*sym.Library, intlibs []bool, exts
 			}
 			osym := r.Sym(i)
 			st := sym.AbiSymKindToSymKind[objabi.SymKind(osym.Type())]
-			if st != sym.STEXT {
+			if !st.IsText() {
 				continue
 			}
 			dupok := osym.Dupok()

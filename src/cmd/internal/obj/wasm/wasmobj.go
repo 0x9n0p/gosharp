@@ -129,6 +129,7 @@ var (
 	morestackNoCtxt       *obj.LSym
 	sigpanic              *obj.LSym
 	wasm_pc_f_loop_export *obj.LSym
+	runtimeNotInitialized *obj.LSym
 )
 
 const (
@@ -149,6 +150,7 @@ func instinit(ctxt *obj.Link) {
 	morestackNoCtxt = ctxt.Lookup("runtime.morestack_noctxt")
 	sigpanic = ctxt.LookupABI("runtime.sigpanic", obj.ABIInternal)
 	wasm_pc_f_loop_export = ctxt.Lookup("wasm_pc_f_loop_export")
+	runtimeNotInitialized = ctxt.Lookup("runtime.notInitialized")
 }
 
 func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
@@ -255,7 +257,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		p = appendp(p, AEnd)
 	}
 
-	if framesize > 0 {
+	if framesize > 0 && s.Func().WasmExport == nil { // genWasmExportWrapper has its own prologue generation
 		p := s.Func().Text
 		p = appendp(p, AGet, regAddr(REG_SP))
 		p = appendp(p, AI32Const, constAddr(framesize))
@@ -853,8 +855,9 @@ func genWasmImportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 			case obj.WasmF64:
 				p = appendp(p, AF64Load, constAddr(loadOffset))
 			case obj.WasmPtr:
-				p = appendp(p, AI64Load, constAddr(loadOffset))
-				p = appendp(p, AI32WrapI64)
+				p = appendp(p, AI32Load, constAddr(loadOffset))
+			case obj.WasmBool:
+				p = appendp(p, AI32Load8U, constAddr(loadOffset))
 			default:
 				panic("bad param type")
 			}
@@ -906,6 +909,12 @@ func genWasmImportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 				p = appendp(p, AGet, regAddr(REG_SP))
 				p = appendp(p, AGet, regAddr(REG_R0))
 				p = appendp(p, AI64Store, constAddr(storeOffset))
+			case obj.WasmBool:
+				p = appendp(p, AI64ExtendI32U)
+				p = appendp(p, ASet, regAddr(REG_R0))
+				p = appendp(p, AGet, regAddr(REG_SP))
+				p = appendp(p, AGet, regAddr(REG_R0))
+				p = appendp(p, AI64Store8, constAddr(storeOffset))
 			default:
 				panic("bad result type")
 			}
@@ -928,6 +937,23 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		panic("wrapper functions for WASM export should not have a body")
 	}
 
+	// Detect and error out if called before runtime initialization
+	// SP is 0 if not initialized
+	p = appendp(p, AGet, regAddr(REG_SP))
+	p = appendp(p, AI32Eqz)
+	p = appendp(p, AIf)
+	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: runtimeNotInitialized})
+	p = appendp(p, AEnd)
+
+	// Now that we've checked the SP, generate the prologue
+	if framesize > 0 {
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI32Const, constAddr(framesize))
+		p = appendp(p, AI32Sub)
+		p = appendp(p, ASet, regAddr(REG_SP))
+		p.Spadj = int32(framesize)
+	}
+
 	// Store args
 	for i, f := range we.Params {
 		p = appendp(p, AGet, regAddr(REG_SP))
@@ -944,6 +970,8 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		case obj.WasmPtr:
 			p = appendp(p, AI64ExtendI32U)
 			p = appendp(p, AI64Store, constAddr(f.Offset))
+		case obj.WasmBool:
+			p = appendp(p, AI32Store8, constAddr(f.Offset))
 		default:
 			panic("bad param type")
 		}
@@ -965,6 +993,10 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		Sym:    s, // PC_F
 		Offset: 1, // PC_B=1, past the prologue, so we have the right SP delta
 	}
+	if framesize == 0 {
+		// Frameless function, no prologue.
+		retAddr.Offset = 0
+	}
 	p = appendp(p, AI64Const, retAddr)
 	p = appendp(p, AI64Store, constAddr(0))
 	// Set PC_B parameter to function entry
@@ -974,9 +1006,10 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 	// In the unwinding case, we call wasm_pc_f_loop_export to handle stack switch and rewinding,
 	// until a normal return (non-unwinding) back to this function.
 	p = appendp(p, AIf)
-	p = appendp(p, AI32Const, retAddr)
-	p = appendp(p, AI32Const, constAddr(16))
-	p = appendp(p, AI32ShrU)
+	p = appendp(p, AI64Const, retAddr)
+	p = appendp(p, AI64Const, constAddr(16))
+	p = appendp(p, AI64ShrU)
+	p = appendp(p, AI32WrapI64)
 	p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: wasm_pc_f_loop_export})
 	p = appendp(p, AEnd)
 
@@ -996,19 +1029,22 @@ func genWasmExportWrapper(s *obj.LSym, appendp func(p *obj.Prog, as obj.As, args
 		case obj.WasmF64:
 			p = appendp(p, AF64Load, constAddr(f.Offset))
 		case obj.WasmPtr:
-			p = appendp(p, AI64Load, constAddr(f.Offset))
-			p = appendp(p, AI32WrapI64)
+			p = appendp(p, AI32Load, constAddr(f.Offset))
+		case obj.WasmBool:
+			p = appendp(p, AI32Load8U, constAddr(f.Offset))
 		default:
 			panic("bad result type")
 		}
 	}
 
 	// Epilogue. Cannot use ARET as we don't follow Go calling convention.
-	// SP += framesize
-	p = appendp(p, AGet, regAddr(REG_SP))
-	p = appendp(p, AI32Const, constAddr(framesize))
-	p = appendp(p, AI32Add)
-	p = appendp(p, ASet, regAddr(REG_SP))
+	if framesize > 0 {
+		// SP += framesize
+		p = appendp(p, AGet, regAddr(REG_SP))
+		p = appendp(p, AI32Const, constAddr(framesize))
+		p = appendp(p, AI32Add)
+		p = appendp(p, ASet, regAddr(REG_SP))
+	}
 	p = appendp(p, AReturn)
 }
 
@@ -1040,6 +1076,7 @@ var notUsePC_B = map[string]bool{
 	"runtime.gcWriteBarrier6": true,
 	"runtime.gcWriteBarrier7": true,
 	"runtime.gcWriteBarrier8": true,
+	"runtime.notInitialized":  true,
 	"runtime.wasmDiv":         true,
 	"runtime.wasmTruncS":      true,
 	"runtime.wasmTruncU":      true,
@@ -1105,7 +1142,8 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		"runtime.gcWriteBarrier5",
 		"runtime.gcWriteBarrier6",
 		"runtime.gcWriteBarrier7",
-		"runtime.gcWriteBarrier8":
+		"runtime.gcWriteBarrier8",
+		"runtime.notInitialized":
 		// no locals
 		useAssemblyRegMap()
 	default:
@@ -1276,14 +1314,16 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 					fmt.Println(p.To)
 					panic("bad name for Call")
 				}
-				r := obj.Addrel(s)
-				r.Siz = 1 // actually variable sized
-				r.Off = int32(w.Len())
-				r.Type = objabi.R_CALL
+				typ := objabi.R_CALL
 				if p.Mark&WasmImport != 0 {
-					r.Type = objabi.R_WASMIMPORT
+					typ = objabi.R_WASMIMPORT
 				}
-				r.Sym = p.To.Sym
+				s.AddRel(ctxt, obj.Reloc{
+					Type: typ,
+					Off:  int32(w.Len()),
+					Siz:  1, // actually variable sized
+					Sym:  p.To.Sym,
+				})
 				if hasLocalSP {
 					// The stack may have moved, which changes SP. Update the local SP variable.
 					updateLocalSP(w)
@@ -1303,12 +1343,13 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 		case AI32Const, AI64Const:
 			if p.From.Name == obj.NAME_EXTERN {
-				r := obj.Addrel(s)
-				r.Siz = 1 // actually variable sized
-				r.Off = int32(w.Len())
-				r.Type = objabi.R_ADDR
-				r.Sym = p.From.Sym
-				r.Add = p.From.Offset
+				s.AddRel(ctxt, obj.Reloc{
+					Type: objabi.R_ADDR,
+					Off:  int32(w.Len()),
+					Siz:  1, // actually variable sized
+					Sym:  p.From.Sym,
+					Add:  p.From.Offset,
+				})
 				break
 			}
 			writeSleb128(w, p.From.Offset)

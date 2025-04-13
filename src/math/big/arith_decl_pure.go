@@ -32,18 +32,18 @@ func subVW(z, x []Word, y Word) (c Word) {
 	return fn(z, x, y)
 }
 
-func shlVU(z, x []Word, s uint) (c Word) {
-	return shlVU_g(z, x, s)
+func lshVU(z, x []Word, s uint) (c Word) {
+	return lshVU_g(z, x, s)
 }
 
-func shrVU(z, x []Word, s uint) (c Word) {
-	return shrVU_g(z, x, s)
+func rshVU(z, x []Word, s uint) (c Word) {
+	return rshVU_g(z, x, s)
 }
 
 func mulAddVWW(z, x []Word, y, r Word) (c Word) {
 	return mulAddVWW_g(z, x, y, r)
 }
 
-func addMulVVW(z, x []Word, y Word) (c Word) {
-	return addMulVVW_g(z, x, y)
+func addMulVVWW(z, x, y []Word, m, a Word) (c Word) {
+	return addMulVVWW_g(z, x, y, m, a)
 }

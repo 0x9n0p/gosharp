@@ -847,9 +847,9 @@ func testStopResetResultGODEBUG(t *testing.T, testStop bool, godebug string) {
 	wg.Wait()
 }
 
-// Test having a large number of goroutines wake up a timer simultaneously.
+// Test having a large number of goroutines wake up a ticker simultaneously.
 // This used to trigger a crash when run under x/tools/cmd/stress.
-func TestMultiWakeup(t *testing.T) {
+func TestMultiWakeupTicker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short")
 	}
@@ -866,6 +866,32 @@ func TestMultiWakeup(t *testing.T) {
 				case <-timer.C:
 				case <-After(Millisecond):
 				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// Test having a large number of goroutines wake up a timer simultaneously.
+// This used to trigger a crash when run under x/tools/cmd/stress.
+func TestMultiWakeupTimer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short")
+	}
+
+	goroutines := runtime.GOMAXPROCS(0)
+	timer := NewTimer(Nanosecond)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			for range 10000 {
+				select {
+				case <-timer.C:
+				default:
+				}
+				timer.Reset(Nanosecond)
 			}
 		}()
 	}
@@ -942,17 +968,15 @@ func BenchmarkParallelTimerLatency(b *testing.B) {
 	}
 	var total float64
 	var samples float64
-	max := Duration(0)
+	maximum := Duration(0)
 	for _, s := range stats {
-		if s.max > max {
-			max = s.max
-		}
+		maximum = max(maximum, s.max)
 		total += s.sum
 		samples += float64(s.count)
 	}
 	b.ReportMetric(0, "ns/op")
 	b.ReportMetric(total/samples, "avg-late-ns")
-	b.ReportMetric(float64(max.Nanoseconds()), "max-late-ns")
+	b.ReportMetric(float64(maximum.Nanoseconds()), "max-late-ns")
 }
 
 // Benchmark timer latency with staggered wakeup times and varying CPU bound

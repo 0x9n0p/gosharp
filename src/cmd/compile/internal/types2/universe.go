@@ -21,6 +21,7 @@ var Unsafe *Package
 
 var (
 	universeIota       Object
+	universeBool       Type
 	universeByte       Type // uint8 alias, but has name "byte"
 	universeRune       Type // int32 alias, but has name "rune"
 	universeAnyNoAlias *TypeName
@@ -118,8 +119,8 @@ func defPredeclaredTypes() {
 		typ := NewNamed(obj, nil, nil)
 
 		// error.Error() string
-		recv := NewVar(nopos, nil, "", typ)
-		res := NewVar(nopos, nil, "", Typ[String])
+		recv := newVar(RecvVar, nopos, nil, "", typ)
+		res := newVar(ResultVar, nopos, nil, "", Typ[String])
 		sig := NewSignatureType(recv, nil, nil, nil, NewTuple(res), false)
 		err := NewFunc(nopos, nil, "Error", sig)
 
@@ -275,6 +276,7 @@ func init() {
 	defPredeclaredFuncs()
 
 	universeIota = Universe.Lookup("iota")
+	universeBool = Universe.Lookup("bool").Type()
 	universeByte = Universe.Lookup("byte").Type()
 	universeRune = Universe.Lookup("rune").Type()
 	universeError = Universe.Lookup("error").Type()

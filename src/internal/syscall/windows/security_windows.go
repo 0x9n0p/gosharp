@@ -5,6 +5,7 @@
 package windows
 
 import (
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -60,7 +61,7 @@ func AdjustTokenPrivileges(token syscall.Token, disableAllPrivileges bool, newst
 }
 
 //sys DuplicateTokenEx(hExistingToken syscall.Token, dwDesiredAccess uint32, lpTokenAttributes *syscall.SecurityAttributes, impersonationLevel uint32, tokenType TokenType, phNewToken *syscall.Token) (err error) = advapi32.DuplicateTokenEx
-//sys SetTokenInformation(tokenHandle syscall.Token, tokenInformationClass uint32, tokenInformation uintptr, tokenInformationLength uint32) (err error) = advapi32.SetTokenInformation
+//sys SetTokenInformation(tokenHandle syscall.Token, tokenInformationClass uint32, tokenInformation unsafe.Pointer, tokenInformationLength uint32) (err error) = advapi32.SetTokenInformation
 
 type SID_AND_ATTRIBUTES struct {
 	Sid        *syscall.SID
@@ -209,4 +210,55 @@ func GetTokenGroups(t syscall.Token) (*TOKEN_GROUPS, error) {
 		return nil, e
 	}
 	return (*TOKEN_GROUPS)(i), nil
+}
+
+// https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-sid_identifier_authority
+type SID_IDENTIFIER_AUTHORITY struct {
+	Value [6]byte
+}
+
+const (
+	SID_REVISION = 1
+	// https://learn.microsoft.com/en-us/windows/win32/services/localsystem-account
+	SECURITY_LOCAL_SYSTEM_RID = 18
+	// https://learn.microsoft.com/en-us/windows/win32/services/localservice-account
+	SECURITY_LOCAL_SERVICE_RID = 19
+	// https://learn.microsoft.com/en-us/windows/win32/services/networkservice-account
+	SECURITY_NETWORK_SERVICE_RID = 20
+)
+
+var SECURITY_NT_AUTHORITY = SID_IDENTIFIER_AUTHORITY{
+	Value: [6]byte{0, 0, 0, 0, 0, 5},
+}
+
+//sys	IsValidSid(sid *syscall.SID) (valid bool) = advapi32.IsValidSid
+//sys	getSidIdentifierAuthority(sid *syscall.SID) (idauth uintptr) = advapi32.GetSidIdentifierAuthority
+//sys	getSidSubAuthority(sid *syscall.SID, subAuthorityIdx uint32) (subAuth uintptr) = advapi32.GetSidSubAuthority
+//sys	getSidSubAuthorityCount(sid *syscall.SID) (count uintptr) = advapi32.GetSidSubAuthorityCount
+
+// The following GetSid* functions are marked as //go:nocheckptr because checkptr
+// instrumentation can't see that the pointer returned by the syscall is pointing
+// into the sid's memory, which is normally allocated on the Go heap. Therefore,
+// the checkptr instrumentation would incorrectly flag the pointer dereference
+// as pointing to an invalid allocation.
+// Also, use runtime.KeepAlive to ensure that the sid is not garbage collected
+// before the GetSid* functions return, as the Go GC is not aware that the
+// pointers returned by the syscall are pointing into the sid's memory.
+
+//go:nocheckptr
+func GetSidIdentifierAuthority(sid *syscall.SID) SID_IDENTIFIER_AUTHORITY {
+	defer runtime.KeepAlive(sid)
+	return *(*SID_IDENTIFIER_AUTHORITY)(unsafe.Pointer(getSidIdentifierAuthority(sid)))
+}
+
+//go:nocheckptr
+func GetSidSubAuthority(sid *syscall.SID, subAuthorityIdx uint32) uint32 {
+	defer runtime.KeepAlive(sid)
+	return *(*uint32)(unsafe.Pointer(getSidSubAuthority(sid, subAuthorityIdx)))
+}
+
+//go:nocheckptr
+func GetSidSubAuthorityCount(sid *syscall.SID) uint8 {
+	defer runtime.KeepAlive(sid)
+	return *(*uint8)(unsafe.Pointer(getSidSubAuthorityCount(sid)))
 }

@@ -14,15 +14,21 @@ import (
 	"internal/goversion"
 	"internal/testenv"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	. "go/types"
+	"runtime"
 )
 
 // nopos indicates an unknown position
 var nopos token.Pos
+
+func defaultImporter(fset *token.FileSet) Importer {
+	return importer.ForCompiler(fset, runtime.Compiler, nil)
+}
 
 func mustParse(fset *token.FileSet, src string) *ast.File {
 	f, err := parser.ParseFile(fset, pkgName(src), src, parser.ParseComments)
@@ -33,12 +39,13 @@ func mustParse(fset *token.FileSet, src string) *ast.File {
 }
 
 func typecheck(src string, conf *Config, info *Info) (*Package, error) {
+	// TODO(adonovan): plumb this from caller.
 	fset := token.NewFileSet()
 	f := mustParse(fset, src)
 	if conf == nil {
 		conf = &Config{
 			Error:    func(err error) {}, // collect all errors
-			Importer: importer.Default(),
+			Importer: defaultImporter(fset),
 		}
 	}
 	return conf.Check(f.Name.Name, fset, []*ast.File{f}, info)
@@ -1128,7 +1135,7 @@ var (
 		Implicits: make(map[ast.Node]Object),
 	}
 	var conf Config
-	conf.Importer = importer.Default()
+	conf.Importer = defaultImporter(fset)
 	_, err := conf.Check("p", fset, []*ast.File{f}, &info)
 	if err != nil {
 		t.Fatal(err)
@@ -3116,5 +3123,51 @@ func TestVersionWithoutPos(t *testing.T) {
 	want := "range over s (variable of type func(func() bool)): requires go1.23"
 	if !strings.Contains(got, want) {
 		t.Errorf("check error was %q, want substring %q", got, want)
+	}
+}
+
+func TestVarKind(t *testing.T) {
+	fset := token.NewFileSet()
+	f, _ := parser.ParseFile(fset, "a.go", `package p
+
+var global int
+
+type T struct { field int }
+
+func (recv T) f(param int) (result int) {
+	var local int
+	local2 := 0
+	switch local3 := any(local).(type) {
+	default:
+		_ = local3
+	}
+	return local2
+}
+`, 0)
+
+	pkg := NewPackage("p", "p")
+	info := &Info{Defs: make(map[*ast.Ident]Object)}
+	check := NewChecker(&Config{}, fset, pkg, info)
+	if err := check.Files([]*ast.File{f}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, obj := range info.Defs {
+		if v, ok := obj.(*Var); ok {
+			got = append(got, fmt.Sprintf("%s: %v", v.Name(), v.Kind()))
+		}
+	}
+	sort.Strings(got)
+	want := []string{
+		"field: FieldVar",
+		"global: PackageVar",
+		"local2: LocalVar",
+		"local: LocalVar",
+		"param: ParamVar",
+		"recv: RecvVar",
+		"result: ResultVar",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }

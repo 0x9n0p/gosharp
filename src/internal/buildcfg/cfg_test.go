@@ -32,6 +32,10 @@ func TestConfigFlags(t *testing.T) {
 	if goriscv64() != 22 {
 		t.Errorf("Wrong parsing of RISCV64=rva22u64")
 	}
+	os.Setenv("GORISCV64", "rva23u64")
+	if goriscv64() != 23 {
+		t.Errorf("Wrong parsing of RISCV64=rva23u64")
+	}
 	Error = nil
 	os.Setenv("GORISCV64", "rva22")
 	if _ = goriscv64(); Error == nil {
@@ -122,4 +126,40 @@ func TestGogoarchTags(t *testing.T) {
 
 	GOARCH = old_goarch
 	GOARM64 = old_goarm64
+}
+
+var goodFIPS = []string{
+	"v1.0.0",
+	"v1.0.1",
+	"v1.2.0",
+	"v1.2.3",
+}
+
+var badFIPS = []string{
+	"v1.0.0-fips",
+	"v1.0.0+fips",
+	"1.0.0",
+	"x1.0.0",
+}
+
+func TestIsFIPSVersion(t *testing.T) {
+	// good
+	for _, s := range goodFIPS {
+		if !isFIPSVersion(s) {
+			t.Errorf("isFIPSVersion(%q) = false, want true", s)
+		}
+	}
+	// truncated
+	const v = "v1.2.3"
+	for i := 0; i < len(v); i++ {
+		if isFIPSVersion(v[:i]) {
+			t.Errorf("isFIPSVersion(%q) = true, want false", v[:i])
+		}
+	}
+	// bad
+	for _, s := range badFIPS {
+		if isFIPSVersion(s) {
+			t.Errorf("isFIPSVersion(%q) = true, want false", s)
+		}
+	}
 }

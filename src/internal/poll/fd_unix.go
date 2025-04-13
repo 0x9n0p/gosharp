@@ -47,6 +47,10 @@ type FD struct {
 	isFile bool
 }
 
+func (fd *FD) initIO() error {
+	return nil
+}
+
 // Init initializes the FD. The Sysfd field should already be set.
 // This can be called multiple times on a single FD.
 // The net argument is a network name from the net package (e.g., "tcp"),
@@ -183,16 +187,9 @@ func (fd *FD) Pread(p []byte, off int64) (int, error) {
 	if fd.IsStream && len(p) > maxRW {
 		p = p[:maxRW]
 	}
-	var (
-		n   int
-		err error
-	)
-	for {
-		n, err = syscall.Pread(fd.Sysfd, p, off)
-		if err != syscall.EINTR {
-			break
-		}
-	}
+	n, err := ignoringEINTR2(func() (int, error) {
+		return syscall.Pread(fd.Sysfd, p, off)
+	})
 	if err != nil {
 		n = 0
 	}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"internal/profile"
 	"internal/testenv"
 	traceparse "internal/trace"
 	"io"
@@ -32,8 +33,11 @@ const entrypointVar = "RUNTIME_TEST_ENTRYPOINT"
 
 func TestMain(m *testing.M) {
 	switch entrypoint := os.Getenv(entrypointVar); entrypoint {
-	case "crash":
-		crash()
+	case "panic":
+		crashViaPanic()
+		panic("unreachable")
+	case "trap":
+		crashViaTrap()
 		panic("unreachable")
 	default:
 		log.Fatalf("invalid %s: %q", entrypointVar, entrypoint)
@@ -353,6 +357,37 @@ panic: third panic
 
 }
 
+func TestReraisedPanic(t *testing.T) {
+	output := runTestProg(t, "testprog", "ReraisedPanic")
+	want := `panic: message [recovered, reraised]
+`
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
+func TestReraisedMiddlePanic(t *testing.T) {
+	output := runTestProg(t, "testprog", "ReraisedMiddlePanic")
+	want := `panic: inner [recovered]
+	panic: middle [recovered, reraised]
+	panic: outer
+`
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
+func TestReraisedPanicSandwich(t *testing.T) {
+	output := runTestProg(t, "testprog", "ReraisedPanicSandwich")
+	want := `panic: outer [recovered]
+	panic: inner [recovered]
+	panic: outer
+`
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
 func TestGoexitCrash(t *testing.T) {
 	// External linking brings in cgo, causing deadlock detection not working.
 	testenv.MustInternalLink(t, false)
@@ -622,7 +657,10 @@ func TestConcurrentMapWrites(t *testing.T) {
 	testenv.MustHaveGoRun(t)
 	output := runTestProg(t, "testprog", "concurrentMapWrites")
 	want := "fatal error: concurrent map writes\n"
-	if !strings.HasPrefix(output, want) {
+	// Concurrent writes can corrupt the map in a way that we
+	// detect with a separate throw.
+	want2 := "fatal error: small map with no empty slot (concurrent map writes?)\n"
+	if !strings.HasPrefix(output, want) && !strings.HasPrefix(output, want2) {
 		t.Fatalf("output does not start with %q:\n%s", want, output)
 	}
 }
@@ -633,7 +671,10 @@ func TestConcurrentMapReadWrite(t *testing.T) {
 	testenv.MustHaveGoRun(t)
 	output := runTestProg(t, "testprog", "concurrentMapReadWrite")
 	want := "fatal error: concurrent map read and map write\n"
-	if !strings.HasPrefix(output, want) {
+	// Concurrent writes can corrupt the map in a way that we
+	// detect with a separate throw.
+	want2 := "fatal error: small map with no empty slot (concurrent map writes?)\n"
+	if !strings.HasPrefix(output, want) && !strings.HasPrefix(output, want2) {
 		t.Fatalf("output does not start with %q:\n%s", want, output)
 	}
 }
@@ -644,7 +685,10 @@ func TestConcurrentMapIterateWrite(t *testing.T) {
 	testenv.MustHaveGoRun(t)
 	output := runTestProg(t, "testprog", "concurrentMapIterateWrite")
 	want := "fatal error: concurrent map iteration and map write\n"
-	if !strings.HasPrefix(output, want) {
+	// Concurrent writes can corrupt the map in a way that we
+	// detect with a separate throw.
+	want2 := "fatal error: small map with no empty slot (concurrent map writes?)\n"
+	if !strings.HasPrefix(output, want) && !strings.HasPrefix(output, want2) {
 		t.Fatalf("output does not start with %q:\n%s", want, output)
 	}
 }
@@ -667,7 +711,10 @@ func TestConcurrentMapWritesIssue69447(t *testing.T) {
 			continue
 		}
 		want := "fatal error: concurrent map writes\n"
-		if !strings.HasPrefix(output, want) {
+		// Concurrent writes can corrupt the map in a way that we
+		// detect with a separate throw.
+		want2 := "fatal error: small map with no empty slot (concurrent map writes?)\n"
+		if !strings.HasPrefix(output, want) && !strings.HasPrefix(output, want2) {
 			t.Fatalf("output does not start with %q:\n%s", want, output)
 		}
 	}
@@ -843,8 +890,7 @@ func init() {
 }
 
 func TestRuntimePanic(t *testing.T) {
-	testenv.MustHaveExec(t)
-	cmd := testenv.CleanCmdEnv(exec.Command(os.Args[0], "-test.run=^TestRuntimePanic$"))
+	cmd := testenv.CleanCmdEnv(exec.Command(testenv.Executable(t), "-test.run=^TestRuntimePanic$"))
 	cmd.Env = append(cmd.Env, "GO_TEST_RUNTIME_PANIC=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s", out)
@@ -856,8 +902,7 @@ func TestRuntimePanic(t *testing.T) {
 }
 
 func TestTracebackRuntimeFunction(t *testing.T) {
-	testenv.MustHaveExec(t)
-	cmd := testenv.CleanCmdEnv(exec.Command(os.Args[0], "-test.run=TestTracebackRuntimeFunction"))
+	cmd := testenv.CleanCmdEnv(exec.Command(testenv.Executable(t), "-test.run=^TestTracebackRuntimeFunction$"))
 	cmd.Env = append(cmd.Env, "GO_TEST_RUNTIME_NPE_READMEMSTATS=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s", out)
@@ -869,8 +914,7 @@ func TestTracebackRuntimeFunction(t *testing.T) {
 }
 
 func TestTracebackRuntimeMethod(t *testing.T) {
-	testenv.MustHaveExec(t)
-	cmd := testenv.CleanCmdEnv(exec.Command(os.Args[0], "-test.run=TestTracebackRuntimeMethod"))
+	cmd := testenv.CleanCmdEnv(exec.Command(testenv.Executable(t), "-test.run=^TestTracebackRuntimeMethod$"))
 	cmd.Env = append(cmd.Env, "GO_TEST_RUNTIME_NPE_FUNCMETHOD=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("%s", out)
@@ -883,14 +927,12 @@ func TestTracebackRuntimeMethod(t *testing.T) {
 
 // Test that g0 stack overflows are handled gracefully.
 func TestG0StackOverflow(t *testing.T) {
-	testenv.MustHaveExec(t)
-
 	if runtime.GOOS == "ios" {
 		testenv.SkipFlaky(t, 62671)
 	}
 
 	if os.Getenv("TEST_G0_STACK_OVERFLOW") != "1" {
-		cmd := testenv.CleanCmdEnv(testenv.Command(t, os.Args[0], "-test.run=^TestG0StackOverflow$", "-test.v"))
+		cmd := testenv.CleanCmdEnv(testenv.Command(t, testenv.Executable(t), "-test.run=^TestG0StackOverflow$", "-test.v"))
 		cmd.Env = append(cmd.Env, "TEST_G0_STACK_OVERFLOW=1")
 		out, err := cmd.CombinedOutput()
 		t.Logf("output:\n%s", out)
@@ -931,7 +973,7 @@ func init() {
 func TestCrashWhileTracing(t *testing.T) {
 	testenv.MustHaveExec(t)
 
-	cmd := testenv.CleanCmdEnv(testenv.Command(t, os.Args[0]))
+	cmd := testenv.CleanCmdEnv(testenv.Command(t, testenv.Executable(t)))
 	cmd.Env = append(cmd.Env, "TEST_CRASH_WHILE_TRACING=1")
 	stdOut, err := cmd.StdoutPipe()
 	var errOut bytes.Buffer
@@ -944,7 +986,8 @@ func TestCrashWhileTracing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not create trace.NewReader: %v", err)
 	}
-	var seen, seenSync bool
+	var seen bool
+	nSync := 0
 	i := 1
 loop:
 	for ; ; i++ {
@@ -959,7 +1002,7 @@ loop:
 		}
 		switch ev.Kind() {
 		case traceparse.EventSync:
-			seenSync = true
+			nSync = ev.Sync().N
 		case traceparse.EventLog:
 			v := ev.Log()
 			if v.Category == "xyzzy-cat" && v.Message == "xyzzy-msg" {
@@ -973,7 +1016,7 @@ loop:
 	if err := cmd.Wait(); err == nil {
 		t.Error("the process should have panicked")
 	}
-	if !seenSync {
+	if nSync <= 1 {
 		t.Errorf("expected at least one full generation to have been emitted before the trace was considered broken")
 	}
 	if !seen {
@@ -1056,5 +1099,82 @@ func TestNetpollWaiters(t *testing.T) {
 	want := "OK\n"
 	if output != want {
 		t.Fatalf("output is not %q\n%s", want, output)
+	}
+}
+
+// The runtime.runFinalizersAndCleanups frame should appear in panics, even if
+// runtime frames are normally hidden (GOTRACEBACK=all).
+func TestFinalizerDeadlockPanic(t *testing.T) {
+	t.Parallel()
+	output := runTestProg(t, "testprog", "FinalizerDeadlock", "GOTRACEBACK=all", "GO_TEST_FINALIZER_DEADLOCK=panic")
+
+	want := "runtime.runFinalizersAndCleanups()"
+	if !strings.Contains(output, want) {
+		t.Errorf("output does not contain %q:\n%s", want, output)
+	}
+}
+
+// The runtime.runFinalizersAndCleanups frame should appear in runtime.Stack,
+// even though runtime frames are normally hidden.
+func TestFinalizerDeadlockStack(t *testing.T) {
+	t.Parallel()
+	output := runTestProg(t, "testprog", "FinalizerDeadlock", "GO_TEST_FINALIZER_DEADLOCK=stack")
+
+	want := "runtime.runFinalizersAndCleanups()"
+	if !strings.Contains(output, want) {
+		t.Errorf("output does not contain %q:\n%s", want, output)
+	}
+}
+
+// The runtime.runFinalizersAndCleanups frame should appear in goroutine
+// profiles.
+func TestFinalizerDeadlockPprofProto(t *testing.T) {
+	t.Parallel()
+	output := runTestProg(t, "testprog", "FinalizerDeadlock", "GO_TEST_FINALIZER_DEADLOCK=pprof_proto")
+
+	p, err := profile.Parse(strings.NewReader(output))
+	if err != nil {
+		// Logging the binary proto data is not very nice, but it might
+		// be a text error message instead.
+		t.Logf("Output: %s", output)
+		t.Fatalf("Error parsing proto output: %v", err)
+	}
+
+	want := "runtime.runFinalizersAndCleanups"
+	for _, s := range p.Sample {
+		for _, loc := range s.Location {
+			for _, line := range loc.Line {
+				if line.Function.Name == want {
+					// Done!
+					return
+				}
+			}
+		}
+	}
+
+	t.Errorf("Profile does not contain %q:\n%s", want, p)
+}
+
+// The runtime.runFinalizersAndCleanups frame should appear in goroutine
+// profiles (debug=1).
+func TestFinalizerDeadlockPprofDebug1(t *testing.T) {
+	t.Parallel()
+	output := runTestProg(t, "testprog", "FinalizerDeadlock", "GO_TEST_FINALIZER_DEADLOCK=pprof_debug1")
+
+	want := "runtime.runFinalizersAndCleanups+"
+	if !strings.Contains(output, want) {
+		t.Errorf("output does not contain %q:\n%s", want, output)
+	}
+}
+
+// The runtime.runFinalizersAndCleanups frame should appear in goroutine
+// profiles (debug=2).
+func TestFinalizerDeadlockPprofDebug2(t *testing.T) {
+	t.Parallel()
+	output := runTestProg(t, "testprog", "FinalizerDeadlock", "GO_TEST_FINALIZER_DEADLOCK=pprof_debug2")
+
+	want := "runtime.runFinalizersAndCleanups()"
+	if !strings.Contains(output, want) {
+		t.Errorf("output does not contain %q:\n%s", want, output)
 	}
 }

@@ -24,12 +24,12 @@ type Expr interface {
 // A miniExpr is a miniNode with extra fields common to expressions.
 // TODO(rsc): Once we are sure about the contents, compact the bools
 // into a bit field and leave extra bits available for implementations
-// embedding miniExpr. Right now there are ~60 unused bits sitting here.
+// embedding miniExpr. Right now there are ~24 unused bits sitting here.
 type miniExpr struct {
 	miniNode
+	flags bitset8
 	typ   *types.Type
 	init  Nodes // TODO(rsc): Don't require every Node to have an init
-	flags bitset8
 }
 
 const (
@@ -191,7 +191,6 @@ type CallExpr struct {
 	KeepAlive []*Name // vars to be kept alive until call returns
 	IsDDD     bool
 	GoDefer   bool // whether this call is part of a go or defer statement
-	NoInline  bool // whether this call must not be inlined
 }
 
 func NewCallExpr(pos src.XPos, op Op, fun Node, args []Node) *CallExpr {

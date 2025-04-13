@@ -133,62 +133,38 @@ func (l limit) String() string {
 }
 
 func (l limit) intersect(l2 limit) limit {
-	if l.min < l2.min {
-		l.min = l2.min
-	}
-	if l.umin < l2.umin {
-		l.umin = l2.umin
-	}
-	if l.max > l2.max {
-		l.max = l2.max
-	}
-	if l.umax > l2.umax {
-		l.umax = l2.umax
-	}
+	l.min = max(l.min, l2.min)
+	l.umin = max(l.umin, l2.umin)
+	l.max = min(l.max, l2.max)
+	l.umax = min(l.umax, l2.umax)
 	return l
 }
 
 func (l limit) signedMin(m int64) limit {
-	if l.min < m {
-		l.min = m
-	}
+	l.min = max(l.min, m)
 	return l
 }
 func (l limit) signedMax(m int64) limit {
-	if l.max > m {
-		l.max = m
-	}
+	l.max = min(l.max, m)
 	return l
 }
-func (l limit) signedMinMax(min, max int64) limit {
-	if l.min < min {
-		l.min = min
-	}
-	if l.max > max {
-		l.max = max
-	}
+func (l limit) signedMinMax(minimum, maximum int64) limit {
+	l.min = max(l.min, minimum)
+	l.max = min(l.max, maximum)
 	return l
 }
 
 func (l limit) unsignedMin(m uint64) limit {
-	if l.umin < m {
-		l.umin = m
-	}
+	l.umin = max(l.umin, m)
 	return l
 }
 func (l limit) unsignedMax(m uint64) limit {
-	if l.umax > m {
-		l.umax = m
-	}
+	l.umax = min(l.umax, m)
 	return l
 }
-func (l limit) unsignedMinMax(min, max uint64) limit {
-	if l.umin < min {
-		l.umin = min
-	}
-	if l.umax > max {
-		l.umax = max
-	}
+func (l limit) unsignedMinMax(minimum, maximum uint64) limit {
+	l.umin = max(l.umin, minimum)
+	l.umax = min(l.umax, maximum)
 	return l
 }
 
@@ -462,6 +438,25 @@ func newFactsTable(f *Func) *factsTable {
 	return ft
 }
 
+// initLimitForNewValue initializes the limits for newly created values,
+// possibly needing to expand the limits slice. Currently used by
+// simplifyBlock when certain provably constant results are folded.
+func (ft *factsTable) initLimitForNewValue(v *Value) {
+	if int(v.ID) >= len(ft.limits) {
+		f := v.Block.Func
+		n := f.NumValues()
+		if cap(ft.limits) >= n {
+			ft.limits = ft.limits[:n]
+		} else {
+			old := ft.limits
+			ft.limits = f.Cache.allocLimitSlice(n)
+			copy(ft.limits, old)
+			f.Cache.freeLimitSlice(old)
+		}
+	}
+	ft.limits[v.ID] = initLimit(v)
+}
+
 // signedMin records the fact that we know v is at least
 // min in the signed domain.
 func (ft *factsTable) signedMin(v *Value, min int64) bool {
@@ -533,8 +528,9 @@ func (ft *factsTable) newLimit(v *Value, newLim limit) bool {
 	}
 
 	if lim.unsat() {
+		r := !ft.unsat
 		ft.unsat = true
-		return true
+		return r
 	}
 
 	// Check for recursion. This normally happens because in unsatisfiable
@@ -668,7 +664,7 @@ func (ft *factsTable) newLimit(v *Value, newLim limit) bool {
 				d |= unsigned
 			}
 			if !isTrue {
-				r ^= (lt | gt | eq)
+				r ^= lt | gt | eq
 			}
 			// TODO: v.Block is wrong?
 			addRestrictions(v.Block, ft, d, v.Args[0], v.Args[1], r)
@@ -701,7 +697,7 @@ func (ft *factsTable) newLimit(v *Value, newLim limit) bool {
 				// But in the signed domain, we can't express the ||
 				// condition, so check if a0 is non-negative instead,
 				// to be able to learn something.
-				r ^= (lt | gt | eq) // >= (index) or > (slice)
+				r ^= lt | gt | eq // >= (index) or > (slice)
 				if ft.isNonNegative(v.Args[0]) {
 					ft.update(v.Block, v.Args[0], v.Args[1], signed, r)
 				}
@@ -1303,8 +1299,8 @@ func prove(f *Func) {
 		}
 
 		// try to rewrite to a downward counting loop checking against start if the
-		// loop body does not depends on ind or nxt and end is known before the loop.
-		// This reduce pressure on the register allocator because this do not need
+		// loop body does not depend on ind or nxt and end is known before the loop.
+		// This reduces pressure on the register allocator because this does not need
 		// to use end on each iteration anymore. We compare against the start constant instead.
 		// That means this code:
 		//
@@ -1336,18 +1332,18 @@ func prove(f *Func) {
 		//
 		//	exit_loop:
 		//
-		// this is better because it only require to keep ind then nxt alive while looping,
+		// this is better because it only requires to keep ind then nxt alive while looping,
 		// while the original form keeps ind then nxt and end alive
 		start, end := v.min, v.max
 		if v.flags&indVarCountDown != 0 {
 			start, end = end, start
 		}
 
-		if !(start.Op == OpConst8 || start.Op == OpConst16 || start.Op == OpConst32 || start.Op == OpConst64) {
+		if !start.isGenericIntConst() {
 			// if start is not a constant we would be winning nothing from inverting the loop
 			continue
 		}
-		if end.Op == OpConst8 || end.Op == OpConst16 || end.Op == OpConst32 || end.Op == OpConst64 {
+		if end.isGenericIntConst() {
 			// TODO: if both start and end are constants we should rewrite such that the comparison
 			// is against zero and nxt is ++ or -- operation
 			// That means:
@@ -1359,7 +1355,7 @@ func prove(f *Func) {
 
 		if end.Block == ind.Block {
 			// we can't rewrite loops where the condition depends on the loop body
-			// this simple check is forced to work because if this is true a Phi in ind.Block must exists
+			// this simple check is forced to work because if this is true a Phi in ind.Block must exist
 			continue
 		}
 
@@ -1550,7 +1546,8 @@ func prove(f *Func) {
 
 // initLimit sets initial constant limit for v.  This limit is based
 // only on the operation itself, not any of its input arguments. This
-// method is only called once on prove pass startup (unlike
+// method is only used in two places, once when the prove pass startup
+// and the other when a new ssa value is created, both for init. (unlike
 // flowLimit, below, which computes additional constraints based on
 // ranges of opcode arguments).
 func initLimit(v *Value) limit {
@@ -1580,19 +1577,8 @@ func initLimit(v *Value) limit {
 	}
 
 	// Default limits based on type.
-	var lim limit
-	switch v.Type.Size() {
-	case 8:
-		lim = limit{min: math.MinInt64, max: math.MaxInt64, umin: 0, umax: math.MaxUint64}
-	case 4:
-		lim = limit{min: math.MinInt32, max: math.MaxInt32, umin: 0, umax: math.MaxUint32}
-	case 2:
-		lim = limit{min: math.MinInt16, max: math.MaxInt16, umin: 0, umax: math.MaxUint16}
-	case 1:
-		lim = limit{min: math.MinInt8, max: math.MaxInt8, umin: 0, umax: math.MaxUint8}
-	default:
-		panic("bad")
-	}
+	bitsize := v.Type.Size() * 8
+	lim := limit{min: -(1 << (bitsize - 1)), max: 1<<(bitsize-1) - 1, umin: 0, umax: 1<<bitsize - 1}
 
 	// Tighter limits on some opcodes.
 	switch v.Op {
@@ -1624,14 +1610,15 @@ func initLimit(v *Value) limit {
 		lim = lim.signedMinMax(math.MinInt32, math.MaxInt32)
 
 	// math/bits intrinsics
-	case OpCtz64, OpBitLen64:
-		lim = lim.unsignedMax(64)
-	case OpCtz32, OpBitLen32:
-		lim = lim.unsignedMax(32)
-	case OpCtz16, OpBitLen16:
-		lim = lim.unsignedMax(16)
-	case OpCtz8, OpBitLen8:
-		lim = lim.unsignedMax(8)
+	case OpCtz64, OpBitLen64, OpPopCount64,
+		OpCtz32, OpBitLen32, OpPopCount32,
+		OpCtz16, OpBitLen16, OpPopCount16,
+		OpCtz8, OpBitLen8, OpPopCount8:
+		lim = lim.unsignedMax(uint64(v.Args[0].Type.Size() * 8))
+
+	// bool to uint8 conversion
+	case OpCvtBoolToUint8:
+		lim = lim.unsignedMax(1)
 
 	// length operations
 	case OpStringLen, OpSliceLen, OpSliceCap:
@@ -1707,6 +1694,14 @@ func (ft *factsTable) flowLimit(v *Value) bool {
 			return ft.unsignedMax(v, uint64(bits.Len8(uint8(a.umax))-1))
 		}
 
+	case OpPopCount64, OpPopCount32, OpPopCount16, OpPopCount8:
+		a := ft.limits[v.Args[0].ID]
+		changingBitsCount := uint64(bits.Len64(a.umax ^ a.umin))
+		sharedLeadingMask := ^(uint64(1)<<changingBitsCount - 1)
+		fixedBits := a.umax & sharedLeadingMask
+		min := uint64(bits.OnesCount64(fixedBits))
+		return ft.unsignedMinMax(v, min, min+changingBitsCount)
+
 	case OpBitLen64:
 		a := ft.limits[v.Args[0].ID]
 		return ft.unsignedMinMax(v,
@@ -1755,74 +1750,30 @@ func (ft *factsTable) flowLimit(v *Value) bool {
 		return ft.newLimit(v, a.com(uint(v.Type.Size())*8))
 
 	// Arithmetic.
-	case OpAdd64:
+	case OpAdd64, OpAdd32, OpAdd16, OpAdd8:
 		a := ft.limits[v.Args[0].ID]
 		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.add(b, 64))
-	case OpAdd32:
+		return ft.newLimit(v, a.add(b, uint(v.Type.Size())*8))
+	case OpSub64, OpSub32, OpSub16, OpSub8:
 		a := ft.limits[v.Args[0].ID]
 		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.add(b, 32))
-	case OpAdd16:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.add(b, 16))
-	case OpAdd8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.add(b, 8))
-	case OpSub64:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.sub(b, 64))
-	case OpSub32:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.sub(b, 32))
-	case OpSub16:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.sub(b, 16))
-	case OpSub8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.sub(b, 8))
+		return ft.newLimit(v, a.sub(b, uint(v.Type.Size())*8))
 	case OpNeg64, OpNeg32, OpNeg16, OpNeg8:
 		a := ft.limits[v.Args[0].ID]
 		bitsize := uint(v.Type.Size()) * 8
 		return ft.newLimit(v, a.com(bitsize).add(limit{min: 1, max: 1, umin: 1, umax: 1}, bitsize))
-	case OpMul64:
+	case OpMul64, OpMul32, OpMul16, OpMul8:
 		a := ft.limits[v.Args[0].ID]
 		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b, 64))
-	case OpMul32:
+		return ft.newLimit(v, a.mul(b, uint(v.Type.Size())*8))
+	case OpLsh64x64, OpLsh64x32, OpLsh64x16, OpLsh64x8,
+		OpLsh32x64, OpLsh32x32, OpLsh32x16, OpLsh32x8,
+		OpLsh16x64, OpLsh16x32, OpLsh16x16, OpLsh16x8,
+		OpLsh8x64, OpLsh8x32, OpLsh8x16, OpLsh8x8:
 		a := ft.limits[v.Args[0].ID]
 		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b, 32))
-	case OpMul16:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b, 16))
-	case OpMul8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b, 8))
-	case OpLsh64x64, OpLsh64x32, OpLsh64x16, OpLsh64x8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b.exp2(64), 64))
-	case OpLsh32x64, OpLsh32x32, OpLsh32x16, OpLsh32x8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b.exp2(32), 32))
-	case OpLsh16x64, OpLsh16x32, OpLsh16x16, OpLsh16x8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b.exp2(16), 16))
-	case OpLsh8x64, OpLsh8x32, OpLsh8x16, OpLsh8x8:
-		a := ft.limits[v.Args[0].ID]
-		b := ft.limits[v.Args[1].ID]
-		return ft.newLimit(v, a.mul(b.exp2(8), 8))
+		bitsize := uint(v.Type.Size()) * 8
+		return ft.newLimit(v, a.mul(b.exp2(bitsize), bitsize))
 	case OpMod64, OpMod32, OpMod16, OpMod8:
 		a := ft.limits[v.Args[0].ID]
 		b := ft.limits[v.Args[1].ID]
@@ -1857,6 +1808,89 @@ func (ft *factsTable) flowLimit(v *Value) bool {
 		return ft.newLimit(v, lim)
 
 	case OpPhi:
+		{
+			// Work around for go.dev/issue/68857, look for min(x, y) and max(x, y).
+			b := v.Block
+			if len(b.Preds) != 2 {
+				goto notMinNorMax
+			}
+			// FIXME: this code searches for the following losange pattern
+			// because that what ssagen produce for min and max builtins:
+			// conditionBlock → (firstBlock, secondBlock) → v.Block
+			// there are three non losange equivalent constructions
+			// we could match for, but I didn't bother:
+			// conditionBlock → (v.Block, secondBlock → v.Block)
+			// conditionBlock → (firstBlock → v.Block, v.Block)
+			// conditionBlock → (v.Block, v.Block)
+			firstBlock, secondBlock := b.Preds[0].b, b.Preds[1].b
+			if firstBlock.Kind != BlockPlain || secondBlock.Kind != BlockPlain {
+				goto notMinNorMax
+			}
+			if len(firstBlock.Preds) != 1 || len(secondBlock.Preds) != 1 {
+				goto notMinNorMax
+			}
+			conditionBlock := firstBlock.Preds[0].b
+			if conditionBlock != secondBlock.Preds[0].b {
+				goto notMinNorMax
+			}
+			if conditionBlock.Kind != BlockIf {
+				goto notMinNorMax
+			}
+
+			less := conditionBlock.Controls[0]
+			var unsigned bool
+			switch less.Op {
+			case OpLess64U, OpLess32U, OpLess16U, OpLess8U,
+				OpLeq64U, OpLeq32U, OpLeq16U, OpLeq8U:
+				unsigned = true
+			case OpLess64, OpLess32, OpLess16, OpLess8,
+				OpLeq64, OpLeq32, OpLeq16, OpLeq8:
+			default:
+				goto notMinNorMax
+			}
+			small, big := less.Args[0], less.Args[1]
+			truev, falsev := v.Args[0], v.Args[1]
+			if conditionBlock.Succs[0].b == secondBlock {
+				truev, falsev = falsev, truev
+			}
+
+			bigl, smalll := ft.limits[big.ID], ft.limits[small.ID]
+			if truev == big {
+				if falsev == small {
+					// v := big if small <¿=? big else small
+					if unsigned {
+						maximum := max(bigl.umax, smalll.umax)
+						minimum := max(bigl.umin, smalll.umin)
+						return ft.unsignedMinMax(v, minimum, maximum)
+					} else {
+						maximum := max(bigl.max, smalll.max)
+						minimum := max(bigl.min, smalll.min)
+						return ft.signedMinMax(v, minimum, maximum)
+					}
+				} else {
+					goto notMinNorMax
+				}
+			} else if truev == small {
+				if falsev == big {
+					// v := small if small <¿=? big else big
+					if unsigned {
+						maximum := min(bigl.umax, smalll.umax)
+						minimum := min(bigl.umin, smalll.umin)
+						return ft.unsignedMinMax(v, minimum, maximum)
+					} else {
+						maximum := min(bigl.max, smalll.max)
+						minimum := min(bigl.min, smalll.min)
+						return ft.signedMinMax(v, minimum, maximum)
+					}
+				} else {
+					goto notMinNorMax
+				}
+			} else {
+				goto notMinNorMax
+			}
+		}
+	notMinNorMax:
+
 		// Compute the union of all the input phis.
 		// Often this will convey no information, because the block
 		// is not dominated by its predecessors and hence the
@@ -2026,8 +2060,85 @@ func addLocalFacts(ft *factsTable, b *Block) {
 			if v.Args[0].Op == OpSliceMake {
 				ft.update(b, v, v.Args[0].Args[2], signed, eq)
 			}
+		case OpPhi:
+			addLocalFactsPhi(ft, v)
 		}
 	}
+}
+
+func addLocalFactsPhi(ft *factsTable, v *Value) {
+	// Look for phis that implement min/max.
+	//   z:
+	//      c = Less64 x y (or other Less/Leq operation)
+	//      If c -> bx by
+	//   bx: <- z
+	//       -> b ...
+	//   by: <- z
+	//      -> b ...
+	//   b: <- bx by
+	//      v = Phi x y
+	// Then v is either min or max of x,y.
+	// If it is the min, then we deduce v <= x && v <= y.
+	// If it is the max, then we deduce v >= x && v >= y.
+	// The min case is useful for the copy builtin, see issue 16833.
+	if len(v.Args) != 2 {
+		return
+	}
+	b := v.Block
+	x := v.Args[0]
+	y := v.Args[1]
+	bx := b.Preds[0].b
+	by := b.Preds[1].b
+	var z *Block // branch point
+	switch {
+	case bx == by: // bx == by == z case
+		z = bx
+	case by.uniquePred() == bx: // bx == z case
+		z = bx
+	case bx.uniquePred() == by: // by == z case
+		z = by
+	case bx.uniquePred() == by.uniquePred():
+		z = bx.uniquePred()
+	}
+	if z == nil || z.Kind != BlockIf {
+		return
+	}
+	c := z.Controls[0]
+	if len(c.Args) != 2 {
+		return
+	}
+	var isMin bool // if c, a less-than comparison, is true, phi chooses x.
+	if bx == z {
+		isMin = b.Preds[0].i == 0
+	} else {
+		isMin = bx.Preds[0].i == 0
+	}
+	if c.Args[0] == x && c.Args[1] == y {
+		// ok
+	} else if c.Args[0] == y && c.Args[1] == x {
+		// Comparison is reversed from how the values are listed in the Phi.
+		isMin = !isMin
+	} else {
+		// Not comparing x and y.
+		return
+	}
+	var dom domain
+	switch c.Op {
+	case OpLess64, OpLess32, OpLess16, OpLess8, OpLeq64, OpLeq32, OpLeq16, OpLeq8:
+		dom = signed
+	case OpLess64U, OpLess32U, OpLess16U, OpLess8U, OpLeq64U, OpLeq32U, OpLeq16U, OpLeq8U:
+		dom = unsigned
+	default:
+		return
+	}
+	var rel relation
+	if isMin {
+		rel = lt | eq
+	} else {
+		rel = gt | eq
+	}
+	ft.update(b, v, x, dom, rel)
+	ft.update(b, v, y, dom, rel)
 }
 
 var ctzNonZeroOp = map[Op]Op{OpCtz8: OpCtz8NonZero, OpCtz16: OpCtz16NonZero, OpCtz32: OpCtz32NonZero, OpCtz64: OpCtz64NonZero}
@@ -2192,6 +2303,7 @@ func simplifyBlock(sdom SparseTree, ft *factsTable, b *Block) {
 				continue
 			}
 			v.SetArg(i, c)
+			ft.initLimitForNewValue(c)
 			if b.Func.pass.debug > 1 {
 				b.Func.Warnl(v.Pos, "Proved %v's arg %d (%v) is constant %d", v, i, arg, constValue)
 			}

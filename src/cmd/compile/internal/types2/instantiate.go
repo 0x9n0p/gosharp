@@ -74,7 +74,8 @@ func Instantiate(ctxt *Context, orig Type, targs []Type, validate bool) (Type, e
 // instance instantiates the given original (generic) function or type with the
 // provided type arguments and returns the resulting instance. If an identical
 // instance exists already in the given contexts, it returns that instance,
-// otherwise it creates a new one.
+// otherwise it creates a new one. If there is an error (such as wrong number
+// of type arguments), the result is Typ[Invalid].
 //
 // If expanding is non-nil, it is the Named instance type currently being
 // expanded. If ctxt is non-nil, it is the context associated with the current
@@ -133,9 +134,13 @@ func (check *Checker) instance(pos syntax.Pos, orig genericType, targs []Type, e
 			assert(expanding == nil) // Alias instances cannot be reached from Named types
 		}
 
+		// verify type parameter count (see go.dev/issue/71198 for a test case)
 		tparams := orig.TypeParams()
-		// TODO(gri) investigate if this is needed (type argument and parameter count seem to be correct here)
-		if !check.validateTArgLen(pos, orig.String(), tparams.Len(), len(targs)) {
+		if !check.validateTArgLen(pos, orig.obj.Name(), tparams.Len(), len(targs)) {
+			// TODO(gri) Consider returning a valid alias instance with invalid
+			//           underlying (aliased) type to match behavior of *Named
+			//           types. Then this function will never return an invalid
+			//           result.
 			return Typ[Invalid]
 		}
 		if tparams.Len() == 0 {
@@ -277,7 +282,7 @@ func (check *Checker) implements(V, T Type, constraint bool, cause *string) bool
 	}
 
 	// V must implement T's methods, if any.
-	if m, _ := check.missingMethod(V, T, true, Identical, cause); m != nil /* !Implements(V, T) */ {
+	if !check.hasAllMethods(V, T, true, Identical, cause) /* !Implements(V, T) */ {
 		if cause != nil {
 			*cause = check.sprintf("%s does not %s %s %s", V, verb, T, *cause)
 		}
@@ -291,12 +296,12 @@ func (check *Checker) implements(V, T Type, constraint bool, cause *string) bool
 		}
 		// If T is comparable, V must be comparable.
 		// If V is strictly comparable, we're done.
-		if comparableType(V, false /* strict comparability */, nil, nil) {
+		if comparableType(V, false /* strict comparability */, nil) == nil {
 			return true
 		}
 		// For constraint satisfaction, use dynamic (spec) comparability
 		// so that ordinary, non-type parameter interfaces implement comparable.
-		if constraint && comparableType(V, true /* spec comparability */, nil, nil) {
+		if constraint && comparableType(V, true /* spec comparability */, nil) == nil {
 			// V is comparable if we are at Go 1.20 or higher.
 			if check == nil || check.allowVersion(go1_20) {
 				return true

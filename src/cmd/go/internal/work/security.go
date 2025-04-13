@@ -90,23 +90,28 @@ var validCompilerFlags = []*lazyregexp.Regexp{
 	re(`-f(no-)?use-linker-plugin`), // safe if -B is not used; we don't permit -B
 	re(`-f(no-)?visibility-inlines-hidden`),
 	re(`-fsanitize=(.+)`),
+	re(`-fsanitize-undefined-strip-path-components=(-)?[0-9]+`),
 	re(`-ftemplate-depth-(.+)`),
 	re(`-ftls-model=(global-dynamic|local-dynamic|initial-exec|local-exec)`),
 	re(`-fvisibility=(.+)`),
 	re(`-g([^@\-].*)?`),
 	re(`-m32`),
 	re(`-m64`),
-	re(`-m(abi|arch|cpu|fpu|tune)=([^@\-].*)`),
+	re(`-m(abi|arch|cpu|fpu|simd|tls-dialect|tune)=([^@\-].*)`),
 	re(`-m(no-)?v?aes`),
 	re(`-marm`),
 	re(`-m(no-)?avx[0-9a-z]*`),
 	re(`-mcmodel=[0-9a-z-]+`),
 	re(`-mfloat-abi=([^@\-].*)`),
+	re(`-m(soft|single|double)-float`),
 	re(`-mfpmath=[0-9a-z,+]*`),
 	re(`-m(no-)?avx[0-9a-z.]*`),
 	re(`-m(no-)?ms-bitfields`),
 	re(`-m(no-)?stack-(.+)`),
 	re(`-mmacosx-(.+)`),
+	re(`-m(no-)?relax`),
+	re(`-m(no-)?strict-align`),
+	re(`-m(no-)?(lsx|lasx|frecipe|div32|lam-bh|lamcas|ld-seq-sa)`),
 	re(`-mios-simulator-version-min=(.+)`),
 	re(`-miphoneos-version-min=(.+)`),
 	re(`-mlarge-data-threshold=[0-9]+`),
@@ -166,8 +171,13 @@ var validLinkerFlags = []*lazyregexp.Regexp{
 	re(`-flat_namespace`),
 	re(`-g([^@\-].*)?`),
 	re(`-headerpad_max_install_names`),
-	re(`-m(abi|arch|cpu|fpu|tune)=([^@\-].*)`),
+	re(`-m(abi|arch|cpu|fpu|simd|tls-dialect|tune)=([^@\-].*)`),
+	re(`-mcmodel=[0-9a-z-]+`),
 	re(`-mfloat-abi=([^@\-].*)`),
+	re(`-m(soft|single|double)-float`),
+	re(`-m(no-)?relax`),
+	re(`-m(no-)?strict-align`),
+	re(`-m(no-)?(lsx|lasx|frecipe|div32|lam-bh|lamcas|ld-seq-sa)`),
 	re(`-mmacosx-(.+)`),
 	re(`-mios-simulator-version-min=(.+)`),
 	re(`-miphoneos-version-min=(.+)`),
@@ -201,21 +211,23 @@ var validLinkerFlags = []*lazyregexp.Regexp{
 	re(`-Wl,--end-group`),
 	re(`-Wl,--(no-)?export-dynamic`),
 	re(`-Wl,-E`),
-	re(`-Wl,-framework,[^,@\-][^,]+`),
+	re(`-Wl,-framework,[^,@\-][^,]*`),
 	re(`-Wl,--hash-style=(sysv|gnu|both)`),
 	re(`-Wl,-headerpad_max_install_names`),
 	re(`-Wl,--no-undefined`),
+	re(`-Wl,--pop-state`),
+	re(`-Wl,--push-state`),
 	re(`-Wl,-R,?([^@\-,][^,@]*$)`),
-	re(`-Wl,--just-symbols[=,]([^,@\-][^,@]+)`),
-	re(`-Wl,-rpath(-link)?[=,]([^,@\-][^,]+)`),
+	re(`-Wl,--just-symbols[=,]([^,@\-][^,@]*)`),
+	re(`-Wl,-rpath(-link)?[=,]([^,@\-][^,]*)`),
 	re(`-Wl,-s`),
 	re(`-Wl,-search_paths_first`),
-	re(`-Wl,-sectcreate,([^,@\-][^,]+),([^,@\-][^,]+),([^,@\-][^,]+)`),
+	re(`-Wl,-sectcreate,([^,@\-][^,]*),([^,@\-][^,]*),([^,@\-][^,]*)`),
 	re(`-Wl,--start-group`),
 	re(`-Wl,-?-static`),
 	re(`-Wl,-?-subsystem,(native|windows|console|posix|xbox)`),
-	re(`-Wl,-syslibroot[=,]([^,@\-][^,]+)`),
-	re(`-Wl,-undefined[=,]([^,@\-][^,]+)`),
+	re(`-Wl,-syslibroot[=,]([^,@\-][^,]*)`),
+	re(`-Wl,-undefined[=,]([^,@\-][^,]*)`),
 	re(`-Wl,-?-unresolved-symbols=[^,]+`),
 	re(`-Wl,--(no-)?warn-([^,]+)`),
 	re(`-Wl,-?-wrap[=,][^,@\-][^,]*`),
@@ -308,7 +320,31 @@ Args:
 			}
 		}
 		for _, re := range valid {
-			if re.FindString(arg) == arg { // must be complete match
+			if match := re.FindString(arg); match == arg { // must be complete match
+				continue Args
+			} else if strings.HasPrefix(arg, "-Wl,--push-state,") {
+				// Examples for --push-state are written
+				//     -Wl,--push-state,--as-needed
+				// Support other commands in the same -Wl arg.
+				args := strings.Split(arg, ",")
+				for _, a := range args[1:] {
+					a = "-Wl," + a
+					var found bool
+					for _, re := range valid {
+						if re.FindString(a) == a {
+							found = true
+							break
+						}
+					}
+					if !found {
+						goto Bad
+					}
+					for _, re := range invalid {
+						if re.FindString(a) == a {
+							goto Bad
+						}
+					}
+				}
 				continue Args
 			}
 		}

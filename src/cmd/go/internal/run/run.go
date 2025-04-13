@@ -8,7 +8,6 @@ package run
 import (
 	"context"
 	"go/build"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -67,9 +66,7 @@ func init() {
 	CmdRun.Run = runRun // break init loop
 
 	work.AddBuildFlags(CmdRun, work.DefaultBuildFlags)
-	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
-		work.AddCoverFlags(CmdRun, nil)
-	}
+	work.AddCoverFlags(CmdRun, nil)
 	CmdRun.Flag.Var((*base.StringsFlag)(&work.ExecCmd), "exec", "")
 }
 
@@ -142,7 +139,7 @@ func runRun(ctx context.Context, cmd *base.Command, args []string) {
 	cmdArgs := args[i:]
 	load.CheckPackageErrors([]*load.Package{p})
 
-	if cfg.Experiment.CoverageRedesign && cfg.BuildCover {
+	if cfg.BuildCover {
 		load.PrepareForCoverageBuild([]*load.Package{p})
 	}
 
@@ -166,10 +163,11 @@ func runRun(ctx context.Context, cmd *base.Command, args []string) {
 		}
 		p.Internal.ExeName = src[:len(src)-len(".go")]
 	} else {
-		p.Internal.ExeName = path.Base(p.ImportPath)
+		p.Internal.ExeName = p.DefaultExecName()
 	}
 
 	a1 := b.LinkAction(work.ModeBuild, work.ModeBuild, p)
+	a1.CacheExecutable = true
 	a := &work.Action{Mode: "go run", Actor: work.ActorFunc(buildRunProgram), Args: cmdArgs, Deps: []*work.Action{a1}}
 	b.Do(ctx, a)
 }
@@ -199,7 +197,7 @@ func shouldUseOutsideModuleMode(args []string) bool {
 // buildRunProgram is the action for running a binary that has already
 // been compiled. We ignore exit status.
 func buildRunProgram(b *work.Builder, ctx context.Context, a *work.Action) error {
-	cmdline := str.StringList(work.FindExecCmd(), a.Deps[0].Target, a.Args)
+	cmdline := str.StringList(work.FindExecCmd(), a.Deps[0].BuiltTarget(), a.Args)
 	if cfg.BuildN || cfg.BuildX {
 		b.Shell(a).ShowCmd("", "%s", strings.Join(cmdline, " "))
 		if cfg.BuildN {

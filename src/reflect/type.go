@@ -59,6 +59,9 @@ type Type interface {
 	// method signature, without a receiver, and the Func field is nil.
 	//
 	// Methods are sorted in lexicographic order.
+	//
+	// Calling this method will force the linker to retain all exported methods in all packages.
+	// This may make the executable binary larger but will not affect execution time.
 	Method(int) Method
 
 	// MethodByName returns the method with that name in the type's
@@ -69,6 +72,10 @@ type Type interface {
 	//
 	// For an interface type, the returned Method's Type field gives the
 	// method signature, without a receiver, and the Func field is nil.
+	//
+	// Calling this method will cause the linker to retain all methods with this name in all packages.
+	// If the linker can't determine the name, it will retain all exported methods.
+	// This may make the executable binary larger but will not affect execution time.
 	MethodByName(string) (Method, bool)
 
 	// NumMethod returns the number of methods accessible using Method.
@@ -301,6 +308,8 @@ const (
 )
 
 // Ptr is the old name for the [Pointer] kind.
+//
+//go:fix inline
 const Ptr = Pointer
 
 // uncommonType is present only for defined types or types with methods
@@ -1303,6 +1312,11 @@ func TypeOf(i any) Type {
 	return toType(abi.TypeOf(i))
 }
 
+// TypeFor returns the [Type] that represents the type argument T.
+func TypeFor[T any]() Type {
+	return toType(abi.TypeFor[T]())
+}
+
 // rtypeOf directly extracts the *rtype of the provided value.
 func rtypeOf(i any) *abi.Type {
 	return abi.TypeOf(i)
@@ -1318,6 +1332,8 @@ var ptrMap sync.Map // map[*rtype]*ptrType
 // The two functions behave identically.
 //
 // Deprecated: Superseded by [PointerTo].
+//
+//go:fix inline
 func PtrTo(t Type) Type { return PointerTo(t) }
 
 // PointerTo returns the pointer type with element t.
@@ -2039,16 +2055,9 @@ func hashMightPanic(t *abi.Type) bool {
 	}
 }
 
-func (t *rtype) gcSlice(begin, end uintptr) []byte {
-	return (*[1 << 30]byte)(unsafe.Pointer(t.t.GCData))[begin:end:end]
-}
-
 // emitGCMask writes the GC mask for [n]typ into out, starting at bit
 // offset base.
 func emitGCMask(out []byte, base uintptr, typ *abi.Type, n uintptr) {
-	if typ.Kind_&abi.KindGCProg != 0 {
-		panic("reflect: unexpected GC program")
-	}
 	ptrs := typ.PtrBytes / goarch.PtrSize
 	words := typ.Size_ / goarch.PtrSize
 	mask := typ.GcSlice(0, (ptrs+7)/8)
@@ -2060,32 +2069,6 @@ func emitGCMask(out []byte, base uintptr, typ *abi.Type, n uintptr) {
 			}
 		}
 	}
-}
-
-// appendGCProg appends the GC program for the first ptrdata bytes of
-// typ to dst and returns the extended slice.
-func appendGCProg(dst []byte, typ *abi.Type) []byte {
-	if typ.Kind_&abi.KindGCProg != 0 {
-		// Element has GC program; emit one element.
-		n := uintptr(*(*uint32)(unsafe.Pointer(typ.GCData)))
-		prog := typ.GcSlice(4, 4+n-1)
-		return append(dst, prog...)
-	}
-
-	// Element is small with pointer mask; use as literal bits.
-	ptrs := typ.PtrBytes / goarch.PtrSize
-	mask := typ.GcSlice(0, (ptrs+7)/8)
-
-	// Emit 120-bit chunks of full bytes (max is 127 but we avoid using partial bytes).
-	for ; ptrs > 120; ptrs -= 120 {
-		dst = append(dst, 120)
-		dst = append(dst, mask[:15]...)
-		mask = mask[15:]
-	}
-
-	dst = append(dst, byte(ptrs))
-	dst = append(dst, mask...)
-	return dst
 }
 
 // SliceOf returns the slice type with element type t.
@@ -2226,8 +2209,6 @@ func StructOf(fields []StructField) Type {
 		fs   = make([]structField, len(fields))
 		repr = make([]byte, 0, 64)
 		fset = map[string]struct{}{} // fields' names
-
-		hasGCProg = false // records whether a struct-field type has a GCProg
 	)
 
 	lastzero := uintptr(0)
@@ -2245,9 +2226,6 @@ func StructOf(fields []StructField) Type {
 		}
 		f, fpkgpath := runtimeStructField(field)
 		ft := f.Typ
-		if ft.Kind_&abi.KindGCProg != 0 {
-			hasGCProg = true
-		}
 		if fpkgpath != "" {
 			if pkgpath == "" {
 				pkgpath = fpkgpath
@@ -2518,51 +2496,19 @@ func StructOf(fields []StructField) Type {
 		typ.TFlag |= abi.TFlagUncommon
 	}
 
-	if hasGCProg {
-		lastPtrField := 0
-		for i, ft := range fs {
-			if ft.Typ.Pointers() {
-				lastPtrField = i
-			}
-		}
-		prog := []byte{0, 0, 0, 0} // will be length of prog
-		var off uintptr
-		for i, ft := range fs {
-			if i > lastPtrField {
-				// gcprog should not include anything for any field after
-				// the last field that contains pointer data
-				break
-			}
-			if !ft.Typ.Pointers() {
-				// Ignore pointerless fields.
-				continue
-			}
-			// Pad to start of this field with zeros.
-			if ft.Offset > off {
-				n := (ft.Offset - off) / goarch.PtrSize
-				prog = append(prog, 0x01, 0x00) // emit a 0 bit
-				if n > 1 {
-					prog = append(prog, 0x81)      // repeat previous bit
-					prog = appendVarint(prog, n-1) // n-1 times
-				}
-				off = ft.Offset
-			}
-
-			prog = appendGCProg(prog, ft.Typ)
-			off += ft.Typ.PtrBytes
-		}
-		prog = append(prog, 0)
-		*(*uint32)(unsafe.Pointer(&prog[0])) = uint32(len(prog) - 4)
-		typ.Kind_ |= abi.KindGCProg
-		typ.GCData = &prog[0]
-	} else {
-		typ.Kind_ &^= abi.KindGCProg
+	if typ.PtrBytes == 0 {
+		typ.GCData = nil
+	} else if typ.PtrBytes <= abi.MaxPtrmaskBytes*8*goarch.PtrSize {
 		bv := new(bitVector)
 		addTypeBits(bv, 0, &typ.Type)
-		if len(bv.data) > 0 {
-			typ.GCData = &bv.data[0]
-		}
+		typ.GCData = &bv.data[0]
+	} else {
+		// Runtime will build the mask if needed. We just need to allocate
+		// space to store it.
+		typ.TFlag |= abi.TFlagGCMaskOnDemand
+		typ.GCData = (*byte)(unsafe.Pointer(new(uintptr)))
 	}
+
 	typ.Equal = nil
 	if comparable {
 		typ.Equal = func(p, q unsafe.Pointer) bool {
@@ -2694,6 +2640,8 @@ func ArrayOf(length int, elem Type) Type {
 	array.Size_ = typ.Size_ * uintptr(length)
 	if length > 0 && typ.Pointers() {
 		array.PtrBytes = typ.Size_*uintptr(length-1) + typ.PtrBytes
+	} else {
+		array.PtrBytes = 0
 	}
 	array.Align_ = typ.Align_
 	array.FieldAlign_ = typ.FieldAlign_
@@ -2701,21 +2649,18 @@ func ArrayOf(length int, elem Type) Type {
 	array.Slice = &(SliceOf(elem).(*rtype).t)
 
 	switch {
-	case !typ.Pointers() || array.Size_ == 0:
+	case array.PtrBytes == 0:
 		// No pointers.
 		array.GCData = nil
-		array.PtrBytes = 0
 
 	case length == 1:
 		// In memory, 1-element array looks just like the element.
-		array.Kind_ |= typ.Kind_ & abi.KindGCProg
+		// We share the bitmask with the element type.
+		array.TFlag |= typ.TFlag & abi.TFlagGCMaskOnDemand
 		array.GCData = typ.GCData
-		array.PtrBytes = typ.PtrBytes
 
-	case typ.Kind_&abi.KindGCProg == 0 && array.Size_ <= abi.MaxPtrmaskBytes*8*goarch.PtrSize:
-		// Element is small with pointer mask; array is still small.
-		// Create direct pointer mask by turning each 1 bit in elem
-		// into length 1 bits in larger mask.
+	case array.PtrBytes <= abi.MaxPtrmaskBytes*8*goarch.PtrSize:
+		// Create pointer mask by repeating the element bitmask Len times.
 		n := (array.PtrBytes/goarch.PtrSize + 7) / 8
 		// Runtime needs pointer masks to be a multiple of uintptr in size.
 		n = (n + goarch.PtrSize - 1) &^ (goarch.PtrSize - 1)
@@ -2724,34 +2669,10 @@ func ArrayOf(length int, elem Type) Type {
 		array.GCData = &mask[0]
 
 	default:
-		// Create program that emits one element
-		// and then repeats to make the array.
-		prog := []byte{0, 0, 0, 0} // will be length of prog
-		prog = appendGCProg(prog, typ)
-		// Pad from ptrdata to size.
-		elemPtrs := typ.PtrBytes / goarch.PtrSize
-		elemWords := typ.Size_ / goarch.PtrSize
-		if elemPtrs < elemWords {
-			// Emit literal 0 bit, then repeat as needed.
-			prog = append(prog, 0x01, 0x00)
-			if elemPtrs+1 < elemWords {
-				prog = append(prog, 0x81)
-				prog = appendVarint(prog, elemWords-elemPtrs-1)
-			}
-		}
-		// Repeat length-1 times.
-		if elemWords < 0x80 {
-			prog = append(prog, byte(elemWords|0x80))
-		} else {
-			prog = append(prog, 0x80)
-			prog = appendVarint(prog, elemWords)
-		}
-		prog = appendVarint(prog, uintptr(length)-1)
-		prog = append(prog, 0)
-		*(*uint32)(unsafe.Pointer(&prog[0])) = uint32(len(prog) - 4)
-		array.Kind_ |= abi.KindGCProg
-		array.GCData = &prog[0]
-		array.PtrBytes = array.Size_ // overestimate but ok; must match program
+		// Runtime will build the mask if needed. We just need to allocate
+		// space to store it.
+		array.TFlag |= abi.TFlagGCMaskOnDemand
+		array.GCData = (*byte)(unsafe.Pointer(new(uintptr)))
 	}
 
 	etyp := typ
@@ -2944,13 +2865,4 @@ func addTypeBits(bv *bitVector, offset uintptr, t *abi.Type) {
 			addTypeBits(bv, offset+f.Offset, f.Typ)
 		}
 	}
-}
-
-// TypeFor returns the [Type] that represents the type argument T.
-func TypeFor[T any]() Type {
-	var v T
-	if t := TypeOf(v); t != nil {
-		return t // optimize for T being a non-interface kind
-	}
-	return TypeOf((*T)(nil)).Elem() // only for an interface kind
 }

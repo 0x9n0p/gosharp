@@ -1221,7 +1221,7 @@ func subMono(t, u int64) Duration {
 // Since returns the time elapsed since t.
 // It is shorthand for time.Now().Sub(t).
 func Since(t Time) Duration {
-	if t.wall&hasMonotonic != 0 {
+	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
 		return subMono(runtimeNano()-startNano, t.ext)
 	}
@@ -1231,7 +1231,7 @@ func Since(t Time) Duration {
 // Until returns the duration until t.
 // It is shorthand for t.Sub(time.Now()).
 func Until(t Time) Duration {
-	if t.wall&hasMonotonic != 0 {
+	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
 		return subMono(t.ext, runtimeNano()-startNano)
 	}
@@ -1297,12 +1297,36 @@ func daysIn(m Month, year int) int {
 }
 
 // Provided by package runtime.
+//
+// now returns the current real time, and is superseded by runtimeNow which returns
+// the fake synctest clock when appropriate.
+//
+// now should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - gitee.com/quant1x/gox
+//   - github.com/phuslu/log
+//   - github.com/sethvargo/go-limiter
+//   - github.com/ulule/limiter/v3
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
 func now() (sec int64, nsec int32, mono int64)
 
-// runtimeNano returns the current value of the runtime clock in nanoseconds.
+// runtimeNow returns the current time.
+// When called within a synctest.Run bubble, it returns the group's fake clock.
 //
-//go:linkname runtimeNano runtime.nanotime
+//go:linkname runtimeNow
+func runtimeNow() (sec int64, nsec int32, mono int64)
+
+// runtimeNano returns the current value of the runtime clock in nanoseconds.
+// When called within a synctest.Run bubble, it returns the group's fake clock.
+//
+//go:linkname runtimeNano
 func runtimeNano() int64
+
+//go:linkname runtimeIsBubbled
+func runtimeIsBubbled() bool
 
 // Monotonic times are reported as offsets from startNano.
 // We initialize startNano to runtimeNano() - 1 so that on systems where
@@ -1317,7 +1341,10 @@ var startNano int64 = runtimeNano() - 1
 
 // Now returns the current local time.
 func Now() Time {
-	sec, nsec, mono := now()
+	sec, nsec, mono := runtimeNow()
+	if mono == 0 {
+		return Time{uint64(nsec), sec + unixToInternal, Local}
+	}
 	mono -= startNano
 	sec += unixToInternal - minWall
 	if uint64(sec)>>33 != 0 {
@@ -1584,16 +1611,20 @@ func (t *Time) UnmarshalJSON(data []byte) error {
 	return err
 }
 
+func (t Time) appendTo(b []byte, errPrefix string) ([]byte, error) {
+	b, err := t.appendStrictRFC3339(b)
+	if err != nil {
+		return nil, errors.New(errPrefix + err.Error())
+	}
+	return b, nil
+}
+
 // AppendText implements the [encoding.TextAppender] interface.
 // The time is formatted in RFC 3339 format with sub-second precision.
 // If the timestamp cannot be represented as valid RFC 3339
 // (e.g., the year is out of range), then an error is returned.
 func (t Time) AppendText(b []byte) ([]byte, error) {
-	b, err := t.appendStrictRFC3339(b)
-	if err != nil {
-		return nil, errors.New("Time.MarshalText: " + err.Error())
-	}
-	return b, nil
+	return t.appendTo(b, "Time.AppendText: ")
 }
 
 // MarshalText implements the [encoding.TextMarshaler] interface. The output
@@ -1601,7 +1632,7 @@ func (t Time) AppendText(b []byte) ([]byte, error) {
 //
 // See [Time.AppendText] for more information.
 func (t Time) MarshalText() ([]byte, error) {
-	return t.AppendText(make([]byte, 0, len(RFC3339Nano)))
+	return t.appendTo(make([]byte, 0, len(RFC3339Nano)), "Time.MarshalText: ")
 }
 
 // UnmarshalText implements the [encoding.TextUnmarshaler] interface.

@@ -251,19 +251,18 @@ copy_4:				// no carry flag, copy the rest
 	vwOneIterCopy(R0, done)
 	B	copy_4
 
-// func shlVU(z, x []Word, s uint) (c Word)
+// func lshVU(z, x []Word, s uint) (c Word)
 // This implementation handles the shift operation from the high word to the low word,
 // which may be an error for the case where the low word of x overlaps with the high
 // word of z. When calling this function directly, you need to pay attention to this
 // situation.
-TEXT ·shlVU(SB),NOSPLIT,$0
+TEXT ·lshVU(SB),NOSPLIT,$0
 	LDP	z+0(FP), (R0, R1)	// R0 = z.ptr, R1 = len(z)
 	MOVD	x+24(FP), R2
 	MOVD	s+48(FP), R3
 	ADD	R1<<3, R0	// R0 = &z[n]
 	ADD	R1<<3, R2	// R2 = &x[n]
 	CBZ	R1, len0
-	CBZ	R3, copy	// if the number of shift is 0, just copy x to z
 	MOVD	$64, R4
 	SUB	R3, R4
 	// handling the most significant element x[n-1]
@@ -313,36 +312,16 @@ done:
 	MOVD.W	R8, -8(R0)	// the first element x[0]
 	MOVD	R5, c+56(FP)	// the part moved out from x[n-1]
 	RET
-copy:
-	CMP	R0, R2
-	BEQ	len0
-	TBZ	$0, R1, ctwo
-	MOVD.W	-8(R2), R4
-	MOVD.W	R4, -8(R0)
-	SUB	$1, R1
-ctwo:
-	TBZ	$1, R1, cloop
-	LDP.W	-16(R2), (R4, R5)
-	STP.W	(R4, R5), -16(R0)
-	SUB	$2, R1
-cloop:
-	CBZ	R1, len0
-	LDP.W	-32(R2), (R4, R5)
-	LDP	16(R2), (R6, R7)
-	STP.W	(R4, R5), -32(R0)
-	STP	(R6, R7), 16(R0)
-	SUB	$4, R1
-	B	cloop
 len0:
 	MOVD	$0, c+56(FP)
 	RET
 
-// func shrVU(z, x []Word, s uint) (c Word)
+// func rshVU(z, x []Word, s uint) (c Word)
 // This implementation handles the shift operation from the low word to the high word,
 // which may be an error for the case where the high word of x overlaps with the low
 // word of z. When calling this function directly, you need to pay attention to this
 // situation.
-TEXT ·shrVU(SB),NOSPLIT,$0
+TEXT ·rshVU(SB),NOSPLIT,$0
 	MOVD	z+0(FP), R0
 	MOVD	z_len+8(FP), R1
 	MOVD	x+24(FP), R2
@@ -351,7 +330,6 @@ TEXT ·shrVU(SB),NOSPLIT,$0
 	MOVD	$64, R4
 	SUB	R3, R4
 	CBZ	R1, len0
-	CBZ	R3, copy	// if the number of shift is 0, just copy x to z
 
 	MOVD.P	8(R2), R20
 	LSR	R3, R20, R8
@@ -400,38 +378,18 @@ loop:
 done:
 	MOVD	R8, (R0)	// deal with the last element
 	RET
-copy:
-	CMP	R0, R2
-	BEQ	len0
-	TBZ	$0, R1, ctwo
-	MOVD.P	8(R2), R3
-	MOVD.P	R3, 8(R0)
-	SUB	$1, R1
-ctwo:
-	TBZ	$1, R1, cloop
-	LDP.P	16(R2), (R4, R5)
-	STP.P	(R4, R5), 16(R0)
-	SUB	$2, R1
-cloop:
-	CBZ	R1, len0
-	LDP.P	32(R2), (R4, R5)
-	LDP	-16(R2), (R6, R7)
-	STP.P	(R4, R5), 32(R0)
-	STP	(R6, R7), -16(R0)
-	SUB	$4, R1
-	B	cloop
 len0:
 	MOVD	$0, c+56(FP)
 	RET
 
 
-// func mulAddVWW(z, x []Word, y, r Word) (c Word)
+// func mulAddVWW(z, x []Word, m, a Word) (c Word)
 TEXT ·mulAddVWW(SB),NOSPLIT,$0
 	MOVD	z+0(FP), R1
 	MOVD	z_len+8(FP), R0
 	MOVD	x+24(FP), R2
-	MOVD	y+48(FP), R3
-	MOVD	r+56(FP), R4
+	MOVD	m+48(FP), R3
+	MOVD	a+56(FP), R4
 	// c, z = x * y + r
 	TBZ	$0, R0, two
 	MOVD.P	8(R2), R5
@@ -483,33 +441,36 @@ done:
 	RET
 
 
-// func addMulVVW(z, x []Word, y Word) (c Word)
-TEXT ·addMulVVW(SB),NOSPLIT,$0
-	MOVD	z+0(FP), R1
+// func addMulVVWW(z, x, y []Word, m, a Word) (c Word)
+TEXT ·addMulVVWW(SB),NOSPLIT,$0
+	MOVD	z+0(FP), R22
+	MOVD	x+24(FP), R1
 	MOVD	z_len+8(FP), R0
-	MOVD	x+24(FP), R2
-	MOVD	y+48(FP), R3
-	MOVD	$0, R4
+	MOVD	y+48(FP), R2
+	MOVD	m+72(FP), R3
+	MOVD	a+80(FP), R4
 
 	TBZ	$0, R0, two
 
 	MOVD.P	8(R2), R5
-	MOVD	(R1), R6
+	MOVD.P	8(R1), R6
 
 	MUL	R5, R3, R7
 	UMULH	R5, R3, R8
 
+	ADDS	R4, R7
+	ADC	$0, R8
 	ADDS	R7, R6
 	ADC	$0, R8, R4
 
-	MOVD.P	R6, 8(R1)
+	MOVD.P	R6, 8(R22)
 	SUB	$1, R0
 
 two:
 	TBZ	$1, R0, loop
 
 	LDP.P	16(R2), (R5, R10)
-	LDP	(R1), (R6, R11)
+	LDP.P	16(R1), (R6, R11)
 
 	MUL	R10, R3, R13
 	UMULH	R10, R3, R12
@@ -525,7 +486,7 @@ two:
 	ADCS	R8, R11
 	ADC	$0, R12, R4
 
-	STP.P	(R6, R11), 16(R1)
+	STP.P	(R6, R11), 16(R22)
 	SUB	$2, R0
 
 // The main loop of this code operates on a block of 4 words every iteration
@@ -538,12 +499,12 @@ loop:
 	LDP.P	16(R2), (R5, R6)
 	LDP.P	16(R2), (R7, R8)
 
-	LDP	(R1), (R9, R10)
+	LDP.P	16(R1), (R9, R10)
 	ADDS	R4, R9
 	MUL	R6, R3, R14
 	ADCS	R14, R10
 	MUL	R7, R3, R15
-	LDP	16(R1), (R11, R12)
+	LDP.P	16(R1), (R11, R12)
 	ADCS	R15, R11
 	MUL	R8, R3, R16
 	ADCS	R16, R12
@@ -555,18 +516,18 @@ loop:
 	UMULH	R5, R3, R17
 	ADCS	R17, R10
 	UMULH	R6, R3, R21
-	STP.P	(R9, R10), 16(R1)
+	STP.P	(R9, R10), 16(R22)
 	ADCS	R21, R11
 	UMULH	R7, R3, R19
 	ADCS	R19, R12
-	STP.P	(R11, R12), 16(R1)
+	STP.P	(R11, R12), 16(R22)
 	ADC	$0, R20, R4
 
 	SUB	$4, R0
 	B	loop
 
 done:
-	MOVD	R4, c+56(FP)
+	MOVD	R4, c+88(FP)
 	RET
 
 

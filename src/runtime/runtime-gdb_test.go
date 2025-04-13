@@ -73,7 +73,9 @@ func checkGdbVersion(t *testing.T) {
 	if err1 != nil || err2 != nil {
 		t.Skipf("skipping: can't determine gdb version: %v, %v", err1, err2)
 	}
-	if major < 7 || (major == 7 && minor < 7) {
+	// The Go toolchain now generates DWARF 5 by default, which needs
+	// a GDB version of 10 or above.
+	if major < 10 {
 		t.Skipf("skipping: gdb version %d.%d too old", major, minor)
 	}
 	t.Logf("gdb version %d.%d", major, minor)
@@ -112,6 +114,44 @@ func checkCleanBacktrace(t *testing.T, backtrace string) {
 	// TODO(mundaym): check for unknown frames (e.g. "??").
 }
 
+// checkPtraceScope checks the value of the kernel parameter ptrace_scope,
+// skips the test when gdb cannot attach to the target process via ptrace.
+// See issue 69932
+//
+// 0 - Default attach security permissions.
+// 1 - Restricted attach. Only child processes plus normal permissions.
+// 2 - Admin-only attach. Only executables with CAP_SYS_PTRACE.
+// 3 - No attach. No process may call ptrace at all. Irrevocable.
+func checkPtraceScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+
+	// If the Linux kernel does not have the YAMA module enabled,
+	// there will be no ptrace_scope file, which does not affect the tests.
+	path := "/proc/sys/kernel/yama/ptrace_scope"
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("failed converting value to int: %v", err)
+	}
+	switch value {
+	case 3:
+		t.Skip("skipping ptrace: Operation not permitted")
+	case 2:
+		if os.Geteuid() != 0 {
+			t.Skip("skipping ptrace: Operation not permitted with non-root user")
+		}
+	}
+}
+
 // NOTE: the maps below are allocated larger than abi.MapBucketCount
 // to ensure that they are not "optimized out".
 
@@ -119,7 +159,10 @@ var helloSource = `
 import "fmt"
 import "runtime"
 var gslice []string
+// TODO(prattmic): Stack allocated maps initialized inline appear "optimized out" in GDB.
+var smallmapvar map[string]string
 func main() {
+	smallmapvar = make(map[string]string)
 	mapvar := make(map[string]string, ` + strconv.FormatInt(abi.OldMapBucketCount+9, 10) + `)
 	slicemap := make(map[string][]string,` + strconv.FormatInt(abi.OldMapBucketCount+3, 10) + `)
     chanint := make(chan int, 10)
@@ -128,6 +171,7 @@ func main() {
 	chanint <- 11
     chanstr <- "spongepants"
     chanstr <- "squarebob"
+	smallmapvar["abc"] = "def"
 	mapvar["abc"] = "def"
 	mapvar["ghi"] = "jkl"
 	slicemap["a"] = []string{"b","c","d"}
@@ -141,6 +185,7 @@ func main() {
 	_ = ptrvar // set breakpoint here
 	gslice = slicevar
 	fmt.Printf("%v, %v, %v\n", slicemap, <-chanint, <-chanstr)
+	runtime.KeepAlive(smallmapvar)
 	runtime.KeepAlive(mapvar)
 }  // END_OF_PROGRAM
 `
@@ -186,9 +231,6 @@ func TestGdbPythonCgo(t *testing.T) {
 }
 
 func testGdbPython(t *testing.T, cgo bool) {
-	if goexperiment.SwissMap {
-		t.Skip("TODO(prattmic): swissmap DWARF")
-	}
 	if cgo {
 		testenv.MustHaveCGO(t)
 	}
@@ -197,6 +239,7 @@ func testGdbPython(t *testing.T, cgo bool) {
 	t.Parallel()
 	checkGdbVersion(t)
 	checkGdbPython(t)
+	checkPtraceScope(t)
 
 	dir := t.TempDir()
 
@@ -258,6 +301,9 @@ func testGdbPython(t *testing.T, cgo bool) {
 		"-ex", "echo BEGIN info goroutines\n",
 		"-ex", "info goroutines",
 		"-ex", "echo END\n",
+		"-ex", "echo BEGIN print smallmapvar\n",
+		"-ex", "print smallmapvar",
+		"-ex", "echo END\n",
 		"-ex", "echo BEGIN print mapvar\n",
 		"-ex", "print mapvar",
 		"-ex", "echo END\n",
@@ -308,6 +354,11 @@ func testGdbPython(t *testing.T, cgo bool) {
 	infoGoroutinesRe := regexp.MustCompile(`\*\s+\d+\s+running\s+`)
 	if bl := blocks["info goroutines"]; !infoGoroutinesRe.MatchString(bl) {
 		t.Fatalf("info goroutines failed: %s", bl)
+	}
+
+	printSmallMapvarRe := regexp.MustCompile(`^\$[0-9]+ = map\[string\]string = {\[(0x[0-9a-f]+\s+)?"abc"\] = (0x[0-9a-f]+\s+)?"def"}$`)
+	if bl := blocks["print smallmapvar"]; !printSmallMapvarRe.MatchString(bl) {
+		t.Fatalf("print smallmapvar failed: %s", bl)
 	}
 
 	printMapvarRe1 := regexp.MustCompile(`^\$[0-9]+ = map\[string\]string = {\[(0x[0-9a-f]+\s+)?"abc"\] = (0x[0-9a-f]+\s+)?"def", \[(0x[0-9a-f]+\s+)?"ghi"\] = (0x[0-9a-f]+\s+)?"jkl"}$`)
@@ -420,6 +471,7 @@ func TestGdbBacktrace(t *testing.T) {
 	checkGdbEnvironment(t)
 	t.Parallel()
 	checkGdbVersion(t)
+	checkPtraceScope(t)
 
 	dir := t.TempDir()
 
@@ -531,13 +583,10 @@ func main() {
 // TestGdbAutotmpTypes ensures that types of autotmp variables appear in .debug_info
 // See bug #17830.
 func TestGdbAutotmpTypes(t *testing.T) {
-	if goexperiment.SwissMap {
-		t.Skip("TODO(prattmic): swissmap DWARF")
-	}
-
 	checkGdbEnvironment(t)
 	t.Parallel()
 	checkGdbVersion(t)
+	checkPtraceScope(t)
 
 	if runtime.GOOS == "aix" && testing.Short() {
 		t.Skip("TestGdbAutotmpTypes is too slow on aix/ppc64")
@@ -584,10 +633,21 @@ func TestGdbAutotmpTypes(t *testing.T) {
 	// Check that the backtrace matches the source code.
 	types := []string{
 		"[]main.astruct",
-		"bucket<string,main.astruct>",
-		"hash<string,main.astruct>",
 		"main.astruct",
-		"hash<string,main.astruct> * map[string]main.astruct",
+	}
+	if goexperiment.SwissMap {
+		types = append(types, []string{
+			"groupReference<string,main.astruct>",
+			"table<string,main.astruct>",
+			"map<string,main.astruct>",
+			"map<string,main.astruct> * map[string]main.astruct",
+		}...)
+	} else {
+		types = append(types, []string{
+			"bucket<string,main.astruct>",
+			"hash<string,main.astruct>",
+			"hash<string,main.astruct> * map[string]main.astruct",
+		}...)
 	}
 	for _, name := range types {
 		if !strings.Contains(sgot, name) {
@@ -612,6 +672,7 @@ func TestGdbConst(t *testing.T) {
 	checkGdbEnvironment(t)
 	t.Parallel()
 	checkGdbVersion(t)
+	checkPtraceScope(t)
 
 	dir := t.TempDir()
 
@@ -676,6 +737,7 @@ func TestGdbPanic(t *testing.T) {
 	checkGdbEnvironment(t)
 	t.Parallel()
 	checkGdbVersion(t)
+	checkPtraceScope(t)
 
 	if runtime.GOOS == "windows" {
 		t.Skip("no signals on windows")
@@ -755,6 +817,7 @@ func TestGdbInfCallstack(t *testing.T) {
 
 	t.Parallel()
 	checkGdbVersion(t)
+	checkPtraceScope(t)
 
 	dir := t.TempDir()
 

@@ -215,8 +215,11 @@ var stdlibImportcfg = sync.OnceValue(func() string {
 	cmd := exec.Command(goTool, "list", "-export", "-f", "{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}", "std")
 	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
 	output, err := cmd.Output()
+	if err, ok := err.(*exec.ExitError); ok && len(err.Stderr) != 0 {
+		log.Fatalf("'go list' failed: %v: %s", err, err.Stderr)
+	}
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("'go list' failed: %v", err)
 	}
 	return string(output)
 })
@@ -1276,9 +1279,16 @@ func (test) updateErrors(out, file string) {
 	// Parse new errors.
 	errors := make(map[int]map[string]bool)
 	tmpRe := regexp.MustCompile(`autotmp_\d+`)
+	fileRe := regexp.MustCompile(`(\.go):\d+:`)
 	for _, errStr := range splitOutput(out, false) {
-		errFile, rest, ok := strings.Cut(errStr, ":")
-		if !ok || errFile != file {
+		m := fileRe.FindStringSubmatchIndex(errStr)
+		if len(m) != 4 {
+			continue
+		}
+		// The end of the file is the end of the first and only submatch.
+		errFile := errStr[:m[3]]
+		rest := errStr[m[3]+1:]
+		if errFile != file {
 			continue
 		}
 		lineStr, msg, ok := strings.Cut(rest, ":")
@@ -1479,7 +1489,7 @@ var (
 		"ppc64x":  {}, // A pseudo-arch representing both ppc64 and ppc64le
 		"s390x":   {},
 		"wasm":    {},
-		"riscv64": {"GORISCV64", "rva20u64", "rva22u64"},
+		"riscv64": {"GORISCV64", "rva20u64", "rva22u64", "rva23u64"},
 	}
 )
 

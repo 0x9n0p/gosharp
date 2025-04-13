@@ -148,26 +148,13 @@ func (check *Checker) unary(x *operand, e *syntax.Operation) {
 		return
 
 	case syntax.Recv:
-		u := coreType(x.typ)
-		if u == nil {
-			check.errorf(x, InvalidReceive, invalidOp+"cannot receive from %s (no core type)", x)
-			x.mode = invalid
+		if elem := check.chanElem(x, x, true); elem != nil {
+			x.mode = commaok
+			x.typ = elem
+			check.hasCallOrRecv = true
 			return
 		}
-		ch, _ := u.(*Chan)
-		if ch == nil {
-			check.errorf(x, InvalidReceive, invalidOp+"cannot receive from non-channel %s", x)
-			x.mode = invalid
-			return
-		}
-		if ch.dir == SendOnly {
-			check.errorf(x, InvalidReceive, invalidOp+"cannot receive from send-only channel %s", x)
-			x.mode = invalid
-			return
-		}
-		x.mode = commaok
-		x.typ = ch.elem
-		check.hasCallOrRecv = true
+		x.mode = invalid
 		return
 
 	case syntax.Tilde:
@@ -203,6 +190,50 @@ func (check *Checker) unary(x *operand, e *syntax.Operation) {
 
 	x.mode = value
 	// x.typ remains unchanged
+}
+
+// chanElem returns the channel element type of x for a receive from x (recv == true)
+// or send to x (recv == false) operation. If the operation is not valid, chanElem
+// reports an error and returns nil.
+func (check *Checker) chanElem(pos poser, x *operand, recv bool) Type {
+	u, err := commonUnder(x.typ, func(t, u Type) *typeError {
+		if u == nil {
+			return typeErrorf("no specific channel type")
+		}
+		ch, _ := u.(*Chan)
+		if ch == nil {
+			return typeErrorf("non-channel %s", t)
+		}
+		if recv && ch.dir == SendOnly {
+			return typeErrorf("send-only channel %s", t)
+		}
+		if !recv && ch.dir == RecvOnly {
+			return typeErrorf("receive-only channel %s", t)
+		}
+		return nil
+	})
+
+	if u != nil {
+		return u.(*Chan).elem
+	}
+
+	cause := err.format(check)
+	if recv {
+		if isTypeParam(x.typ) {
+			check.errorf(pos, InvalidReceive, invalidOp+"cannot receive from %s: %s", x, cause)
+		} else {
+			// In this case, only the non-channel and send-only channel error are possible.
+			check.errorf(pos, InvalidReceive, invalidOp+"cannot receive from %s %s", cause, x)
+		}
+	} else {
+		if isTypeParam(x.typ) {
+			check.errorf(pos, InvalidSend, invalidOp+"cannot send to %s: %s", x, cause)
+		} else {
+			// In this case, only the non-channel and receive-only channel error are possible.
+			check.errorf(pos, InvalidSend, invalidOp+"cannot send to %s %s", cause, x)
+		}
+	}
+	return nil
 }
 
 func isShift(op syntax.Operator) bool {
@@ -566,7 +597,12 @@ Error:
 			}
 			cause = check.sprintf("type parameter %s cannot use operator %s", errOp.typ, op)
 		} else {
-			cause = check.sprintf("operator %s not defined on %s", op, check.kindString(errOp.typ)) // catch-all
+			// catch-all: neither x nor y is a type parameter
+			what := compositeKind(errOp.typ)
+			if what == "" {
+				what = check.sprintf("%s", errOp.typ)
+			}
+			cause = check.sprintf("operator %s not defined on %s", op, what)
 		}
 	}
 	if switchCase {
@@ -582,41 +618,10 @@ Error:
 func (check *Checker) incomparableCause(typ Type) string {
 	switch under(typ).(type) {
 	case *Slice, *Signature, *Map:
-		return check.kindString(typ) + " can only be compared to nil"
+		return compositeKind(typ) + " can only be compared to nil"
 	}
 	// see if we can extract a more specific error
-	var cause string
-	comparableType(typ, true, nil, func(format string, args ...interface{}) {
-		cause = check.sprintf(format, args...)
-	})
-	return cause
-}
-
-// kindString returns the type kind as a string.
-func (check *Checker) kindString(typ Type) string {
-	switch under(typ).(type) {
-	case *Array:
-		return "array"
-	case *Slice:
-		return "slice"
-	case *Struct:
-		return "struct"
-	case *Pointer:
-		return "pointer"
-	case *Signature:
-		return "func"
-	case *Interface:
-		if isTypeParam(typ) {
-			return check.sprintf("type parameter %s", typ)
-		}
-		return "interface"
-	case *Map:
-		return "map"
-	case *Chan:
-		return "chan"
-	default:
-		return check.sprintf("%s", typ) // catch-all
-	}
+	return comparableType(typ, true, nil).format(check)
 }
 
 // If e != nil, it must be the shift expression; it may be nil for non-constant shifts.
@@ -1038,9 +1043,8 @@ func (check *Checker) exprInternal(T *target, x *operand, e syntax.Expr, hint Ty
 		check.ident(x, e, nil, false)
 
 	case *syntax.DotsType:
-		// dots are handled explicitly where they are legal
-		// (array composite literals and parameter lists)
-		check.error(e, BadDotDotDotSyntax, "invalid use of '...'")
+		// dots are handled explicitly where they are valid
+		check.error(e, InvalidSyntaxTree, "invalid use of ...")
 		goto Error
 
 	case *syntax.BasicLit:

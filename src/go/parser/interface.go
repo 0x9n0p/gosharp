@@ -92,6 +92,8 @@ func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast
 		return nil, err
 	}
 
+	file := fset.AddFile(filename, -1, len(text))
+
 	var p parser
 	defer func() {
 		if e := recover(); e != nil {
@@ -115,12 +117,17 @@ func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast
 			}
 		}
 
+		// Ensure the start/end are consistent,
+		// whether parsing succeeded or not.
+		f.FileStart = token.Pos(file.Base())
+		f.FileEnd = token.Pos(file.Base() + file.Size())
+
 		p.errors.Sort()
 		err = p.errors.Err()
 	}()
 
 	// parse source
-	p.init(fset, filename, text, mode)
+	p.init(file, text, mode)
 	f = p.parseFile()
 
 	return
@@ -138,6 +145,11 @@ func ParseFile(fset *token.FileSet, filename string, src any, mode Mode) (f *ast
 // If the directory couldn't be read, a nil map and the respective error are
 // returned. If a parse error occurred, a non-nil but incomplete map and the
 // first error encountered are returned.
+//
+// Deprecated: ParseDir does not consider build tags when associating
+// files with packages. For precise information about the relationship
+// between packages and files, use golang.org/x/tools/go/packages,
+// which can also optionally parse and type-check the files too.
 func ParseDir(fset *token.FileSet, path string, filter func(fs.FileInfo) bool, mode Mode) (pkgs map[string]*ast.Package, first error) {
 	list, err := os.ReadDir(path)
 	if err != nil {
@@ -215,7 +227,8 @@ func ParseExprFrom(fset *token.FileSet, filename string, src any, mode Mode) (ex
 	}()
 
 	// parse expr
-	p.init(fset, filename, text, mode)
+	file := fset.AddFile(filename, -1, len(text))
+	p.init(file, text, mode)
 	expr = p.parseRhs()
 
 	// If a semicolon was inserted, consume it;

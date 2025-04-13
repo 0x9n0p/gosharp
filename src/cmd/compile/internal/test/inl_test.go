@@ -45,6 +45,8 @@ func TestIntendedInlining(t *testing.T) {
 			"funcspdelta",
 			"getm",
 			"getMCache",
+			"heapSetTypeNoHeader",
+			"heapSetTypeSmallHeader",
 			"isDirectIface",
 			"itabHashFunc",
 			"nextslicecap",
@@ -188,7 +190,7 @@ func TestIntendedInlining(t *testing.T) {
 			// Both OnceFunc and its returned closure need to be inlinable so
 			// that the returned closure can be inlined into the caller of OnceFunc.
 			"OnceFunc",
-			"OnceFunc.func2", // The returned closure.
+			"OnceFunc.func1", // The returned closure.
 			// TODO(austin): It would be good to check OnceValue and OnceValues,
 			// too, but currently they aren't reported because they have type
 			// parameters and aren't instantiated in sync.
@@ -227,6 +229,9 @@ func TestIntendedInlining(t *testing.T) {
 			"(*Pointer[go.shape.int]).Load",
 			"(*Pointer[go.shape.int]).Store",
 			"(*Pointer[go.shape.int]).Swap",
+		},
+		"testing": {
+			"(*B).Loop",
 		},
 	}
 
@@ -373,10 +378,6 @@ func TestIssue56044(t *testing.T) {
 	if testing.Short() {
 		t.Skipf("skipping test: too long for short mode")
 	}
-	if !goexperiment.CoverageRedesign {
-		t.Skipf("skipping new coverage tests (experiment not enabled)")
-	}
-
 	testenv.MustHaveGoBuild(t)
 
 	modes := []string{"-covermode=set", "-covermode=atomic"}

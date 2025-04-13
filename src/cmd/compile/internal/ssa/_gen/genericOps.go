@@ -229,6 +229,7 @@ var genericOps = []opData{
 	{name: "Ctz16", argLength: 1},        // Count trailing (low order) zeroes (returns 0-16)
 	{name: "Ctz32", argLength: 1},        // Count trailing (low order) zeroes (returns 0-32)
 	{name: "Ctz64", argLength: 1},        // Count trailing (low order) zeroes (returns 0-64)
+	{name: "Ctz64On32", argLength: 2},    // Count trailing (low order) zeroes (returns 0-64) in arg[1]<<32+arg[0]
 	{name: "Ctz8NonZero", argLength: 1},  // same as above, but arg[0] known to be non-zero, returns 0-7
 	{name: "Ctz16NonZero", argLength: 1}, // same as above, but arg[0] known to be non-zero, returns 0-15
 	{name: "Ctz32NonZero", argLength: 1}, // same as above, but arg[0] known to be non-zero, returns 0-31
@@ -358,13 +359,13 @@ var genericOps = []opData{
 	// If the variable is a global, the base pointer will be SB and
 	// the Aux field will be a *obj.LSym.
 	// If the variable is a local, the base pointer will be SP and
-	// the Aux field will be a *gc.Node.
+	// the Aux field will be a *ir.Name
 	{name: "Addr", argLength: 1, aux: "Sym", symEffect: "Addr"},      // Address of a variable.  Arg0=SB.  Aux identifies the variable.
 	{name: "LocalAddr", argLength: 2, aux: "Sym", symEffect: "Addr"}, // Address of a variable.  Arg0=SP. Arg1=mem. Aux identifies the variable.
 
-	{name: "SP", zeroWidth: true},                                       // stack pointer
-	{name: "SB", typ: "Uintptr", zeroWidth: true},                       // static base pointer (a.k.a. globals pointer)
-	{name: "Invalid"},                                                   // unused value
+	{name: "SP", zeroWidth: true, fixedReg: true},                 // stack pointer
+	{name: "SB", typ: "Uintptr", zeroWidth: true, fixedReg: true}, // static base pointer (a.k.a. globals pointer)
+	{name: "Invalid"}, // unused value
 	{name: "SPanchored", typ: "Uintptr", argLength: 2, zeroWidth: true}, // arg0 = SP, arg1 = mem. Result is identical to arg0, but cannot be scheduled before memory state arg1.
 
 	// Memory operations
@@ -542,9 +543,9 @@ var genericOps = []opData{
 	// Unknown value. Used for Values whose values don't matter because they are dead code.
 	{name: "Unknown"},
 
-	{name: "VarDef", argLength: 1, aux: "Sym", typ: "Mem", symEffect: "None", zeroWidth: true}, // aux is a *gc.Node of a variable that is about to be initialized.  arg0=mem, returns mem
+	{name: "VarDef", argLength: 1, aux: "Sym", typ: "Mem", symEffect: "None", zeroWidth: true}, // aux is a *ir.Name of a variable that is about to be initialized.  arg0=mem, returns mem
 	// TODO: what's the difference between VarLive and KeepAlive?
-	{name: "VarLive", argLength: 1, aux: "Sym", symEffect: "Read", zeroWidth: true}, // aux is a *gc.Node of a variable that must be kept live.  arg0=mem, returns mem
+	{name: "VarLive", argLength: 1, aux: "Sym", symEffect: "Read", zeroWidth: true}, // aux is a *ir.Name of a variable that must be kept live.  arg0=mem, returns mem
 	{name: "KeepAlive", argLength: 2, typ: "Mem", zeroWidth: true},                  // arg[0] is a value that must be kept alive until this mark.  arg[1]=mem, returns mem
 
 	// InlMark marks the start of an inlined function body. Its AuxInt field
@@ -584,6 +585,7 @@ var genericOps = []opData{
 	// pseudo-ops for breaking Tuple
 	{name: "Select0", argLength: 1, zeroWidth: true},  // the first component of a tuple
 	{name: "Select1", argLength: 1, zeroWidth: true},  // the second component of a tuple
+	{name: "MakeTuple", argLength: 2},                 // arg0 arg1 are components of a "Tuple" (like the result from a 128bits op).
 	{name: "SelectN", argLength: 1, aux: "Int64"},     // arg0=result, auxint=field index.  Returns the auxint'th member.
 	{name: "SelectNAddr", argLength: 1, aux: "Int64"}, // arg0=result, auxint=field index.  Returns the address of auxint'th member. Used for un-SSA-able result types.
 	{name: "MakeResult", argLength: -1},               // arg0 .. are components of a "Result" (like the result from a Call). The last arg should be memory (like the result from a call).
@@ -630,9 +632,12 @@ var genericOps = []opData{
 	// Atomic operation variants
 	// These variants have the same semantics as above atomic operations.
 	// But they are used for generating more efficient code on certain modern machines, with run-time CPU feature detection.
-	// On ARM64, these are used when the LSE hardware feature is avaliable (either known at compile time or detected at runtime). If LSE is not avaliable,
-	// then the basic atomic oprations are used instead.
-	// These are not currently used on any other platform.
+	// On ARM64, these are used when the LSE hardware feature is available (either known at compile time or detected at runtime). If LSE is not available,
+	// then the basic atomic operations are used instead.
+	{name: "AtomicStore8Variant", argLength: 3, typ: "Mem", hasSideEffects: true},  // Store arg1 to *arg0.  arg2=memory.  Returns memory.
+	{name: "AtomicStore32Variant", argLength: 3, typ: "Mem", hasSideEffects: true}, // Store arg1 to *arg0.  arg2=memory.  Returns memory.
+	{name: "AtomicStore64Variant", argLength: 3, typ: "Mem", hasSideEffects: true}, // Store arg1 to *arg0.  arg2=memory.  Returns memory.
+
 	{name: "AtomicAdd32Variant", argLength: 3, typ: "(UInt32,Mem)", hasSideEffects: true},          // Do *arg0 += arg1.  arg2=memory.  Returns sum and new memory.
 	{name: "AtomicAdd64Variant", argLength: 3, typ: "(UInt64,Mem)", hasSideEffects: true},          // Do *arg0 += arg1.  arg2=memory.  Returns sum and new memory.
 	{name: "AtomicExchange8Variant", argLength: 3, typ: "(UInt8,Mem)", hasSideEffects: true},       // Store arg1 to *arg0.  arg2=memory.  Returns old contents of *arg0 and new memory.
@@ -659,21 +664,21 @@ var genericOps = []opData{
 	{name: "PrefetchCacheStreamed", argLength: 2, hasSideEffects: true}, // Do non-temporal or streamed prefetch arg0 to cache. arg0=addr, arg1=memory.
 }
 
-//     kind          controls        successors   implicit exit
-//   ----------------------------------------------------------
-//     Exit      [return mem]                []             yes
-//      Ret      [return mem]                []             yes
-//   RetJmp      [return mem]                []             yes
-//    Plain                []            [next]
-//       If   [boolean Value]      [then, else]
-//    First                []   [always, never]
-//    Defer             [mem]  [nopanic, panic]                  (control opcode should be OpStaticCall to runtime.deferproc)
-// JumpTable   [integer Value]  [succ1,succ2,..]
+//     kind          controls          successors   implicit exit
+//   ------------------------------------------------------------
+//     Exit      [return mem]                  []             yes
+//      Ret      [return mem]                  []             yes
+//   RetJmp      [return mem]                  []             yes
+//    Plain                []              [next]
+//       If   [boolean Value]        [then, else]
+//    First                []     [always, never]
+//    Defer             [mem] [nopanic, recovery]                  (control opcode should be OpStaticCall to runtime.defer*)
+// JumpTable   [integer Value]   [succ1,succ2,..]
 
 var genericBlocks = []blockData{
 	{name: "Plain"},                  // a single successor
 	{name: "If", controls: 1},        // if Controls[0] goto Succs[0] else goto Succs[1]
-	{name: "Defer", controls: 1},     // Succs[0]=defer queued, Succs[1]=defer recovered. Controls[0] is call op (of memory type)
+	{name: "Defer", controls: 1},     // Succs[0]=defer queued, Succs[1]=defer recovery branch (jmp performed by runtime). Controls[0] is call op (of memory type).
 	{name: "Ret", controls: 1},       // no successors, Controls[0] value is memory result
 	{name: "RetJmp", controls: 1},    // no successors, Controls[0] value is a tail call
 	{name: "Exit", controls: 1},      // no successors, Controls[0] value generates a panic

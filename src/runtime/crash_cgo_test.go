@@ -72,6 +72,22 @@ func TestCgoCallbackGC(t *testing.T) {
 	}
 }
 
+func TestCgoCallbackPprof(t *testing.T) {
+	t.Parallel()
+	switch runtime.GOOS {
+	case "plan9", "windows":
+		t.Skipf("no pthreads on %s", runtime.GOOS)
+	}
+	if testenv.CPUProfilingBroken() {
+		t.Skip("skipping on platform with broken profiling")
+	}
+
+	got := runTestProg(t, "testprogcgo", "CgoCallbackPprof")
+	if want := "OK\n"; got != want {
+		t.Fatalf("expected %q, but got:\n%s", want, got)
+	}
+}
+
 func TestCgoExternalThreadPanic(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "plan9" {
@@ -238,6 +254,7 @@ func TestCgoCrashTraceback(t *testing.T) {
 	case "darwin/amd64":
 	case "linux/amd64":
 	case "linux/arm64":
+	case "linux/loong64":
 	case "linux/ppc64le":
 	default:
 		t.Skipf("not yet supported on %s", platform)
@@ -256,6 +273,7 @@ func TestCgoCrashTracebackGo(t *testing.T) {
 	case "darwin/amd64":
 	case "linux/amd64":
 	case "linux/arm64":
+	case "linux/loong64":
 	case "linux/ppc64le":
 	default:
 		t.Skipf("not yet supported on %s", platform)
@@ -289,7 +307,7 @@ func TestCgoTracebackContextPreemption(t *testing.T) {
 
 func testCgoPprof(t *testing.T, buildArg, runArg, top, bottom string) {
 	t.Parallel()
-	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "ppc64le" && runtime.GOARCH != "arm64") {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "ppc64le" && runtime.GOARCH != "arm64" && runtime.GOARCH != "loong64") {
 		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	testenv.MustHaveGoRun(t)

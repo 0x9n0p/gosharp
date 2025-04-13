@@ -15,10 +15,8 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/analysis/passes/internal/analysisutil"
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/internal/aliases"
+	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/versions"
 )
@@ -38,7 +36,7 @@ var Analyzer = &analysis.Analyzer{
 	Run:              run,
 }
 
-func run(pass *analysis.Pass) (interface{}, error) {
+func run(pass *analysis.Pass) (any, error) {
 	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
 	var goversion string // effective file version ("" => unknown)
@@ -88,7 +86,7 @@ func checkCopyLocksAssign(pass *analysis.Pass, assign *ast.AssignStmt, goversion
 	lhs := assign.Lhs
 	for i, x := range assign.Rhs {
 		if path := lockPathRhs(pass, x); path != nil {
-			pass.ReportRangef(x, "assignment copies lock value to %v: %v", analysisutil.Format(pass.Fset, assign.Lhs[i]), path)
+			pass.ReportRangef(x, "assignment copies lock value to %v: %v", analysisinternal.Format(pass.Fset, assign.Lhs[i]), path)
 			lhs = nil // An lhs has been reported. We prefer the assignment warning and do not report twice.
 		}
 	}
@@ -102,7 +100,7 @@ func checkCopyLocksAssign(pass *analysis.Pass, assign *ast.AssignStmt, goversion
 				if id, ok := l.(*ast.Ident); ok && id.Name != "_" {
 					if obj := pass.TypesInfo.Defs[id]; obj != nil && obj.Type() != nil {
 						if path := lockPath(pass.Pkg, obj.Type(), nil); path != nil {
-							pass.ReportRangef(l, "for loop iteration copies lock value to %v: %v", analysisutil.Format(pass.Fset, l), path)
+							pass.ReportRangef(l, "for loop iteration copies lock value to %v: %v", analysisinternal.Format(pass.Fset, l), path)
 						}
 					}
 				}
@@ -134,7 +132,7 @@ func checkCopyLocksCompositeLit(pass *analysis.Pass, cl *ast.CompositeLit) {
 			x = node.Value
 		}
 		if path := lockPathRhs(pass, x); path != nil {
-			pass.ReportRangef(x, "literal copies lock value from %v: %v", analysisutil.Format(pass.Fset, x), path)
+			pass.ReportRangef(x, "literal copies lock value from %v: %v", analysisinternal.Format(pass.Fset, x), path)
 		}
 	}
 }
@@ -165,7 +163,7 @@ func checkCopyLocksCallExpr(pass *analysis.Pass, ce *ast.CallExpr) {
 	}
 	for _, x := range ce.Args {
 		if path := lockPathRhs(pass, x); path != nil {
-			pass.ReportRangef(x, "call of %s copies lock value: %v", analysisutil.Format(pass.Fset, ce.Fun), path)
+			pass.ReportRangef(x, "call of %s copies lock value: %v", analysisinternal.Format(pass.Fset, ce.Fun), path)
 		}
 	}
 }
@@ -232,7 +230,7 @@ func checkCopyLocksRangeVar(pass *analysis.Pass, rtok token.Token, e ast.Expr) {
 		return
 	}
 	if path := lockPath(pass.Pkg, typ, nil); path != nil {
-		pass.Reportf(e.Pos(), "range var %s copies lock: %v", analysisutil.Format(pass.Fset, e), path)
+		pass.Reportf(e.Pos(), "range var %s copies lock: %v", analysisinternal.Format(pass.Fset, e), path)
 	}
 }
 
@@ -253,7 +251,7 @@ func (path typePath) String() string {
 }
 
 func lockPathRhs(pass *analysis.Pass, x ast.Expr) typePath {
-	x = astutil.Unparen(x) // ignore parens on rhs
+	x = ast.Unparen(x) // ignore parens on rhs
 
 	if _, ok := x.(*ast.CompositeLit); ok {
 		return nil
@@ -263,7 +261,7 @@ func lockPathRhs(pass *analysis.Pass, x ast.Expr) typePath {
 		return nil
 	}
 	if star, ok := x.(*ast.StarExpr); ok {
-		if _, ok := astutil.Unparen(star.X).(*ast.CallExpr); ok {
+		if _, ok := ast.Unparen(star.X).(*ast.CallExpr); ok {
 			// A call may return a pointer to a zero value.
 			return nil
 		}
@@ -287,7 +285,7 @@ func lockPath(tpkg *types.Package, typ types.Type, seen map[types.Type]bool) typ
 	}
 	seen[typ] = true
 
-	if tpar, ok := aliases.Unalias(typ).(*types.TypeParam); ok {
+	if tpar, ok := types.Unalias(typ).(*types.TypeParam); ok {
 		terms, err := typeparams.StructuralTerms(tpar)
 		if err != nil {
 			return nil // invalid type
@@ -352,7 +350,7 @@ func lockPath(tpkg *types.Package, typ types.Type, seen map[types.Type]bool) typ
 	// In go1.10, sync.noCopy did not implement Locker.
 	// (The Unlock method was added only in CL 121876.)
 	// TODO(adonovan): remove workaround when we drop go1.10.
-	if analysisutil.IsNamedType(typ, "sync", "noCopy") {
+	if analysisinternal.IsTypeNamed(typ, "sync", "noCopy") {
 		return []string{typ.String()}
 	}
 
@@ -380,7 +378,7 @@ var lockerType *types.Interface
 
 // Construct a sync.Locker interface type.
 func init() {
-	nullary := types.NewSignature(nil, nil, nil, false) // func()
+	nullary := types.NewSignatureType(nil, nil, nil, nil, nil, false) // func()
 	methods := []*types.Func{
 		types.NewFunc(token.NoPos, nil, "Lock", nullary),
 		types.NewFunc(token.NoPos, nil, "Unlock", nullary),

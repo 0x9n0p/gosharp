@@ -263,9 +263,9 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 	r := relocs.At(ri)
 	switch r.Type() {
 	case objabi.ElfRelocOffset + objabi.RelocType(elf.R_LARCH_B26):
-		// Host object relocations that will be turned into a PLT call.
-		// The PLT may be too far. Insert a trampoline for them.
-		fallthrough
+		// Nothing to do.
+		// The plt symbol has not been added. If we add tramp
+		// here, plt will not work.
 	case objabi.R_CALLLOONG64:
 		var t int64
 		// ldr.SymValue(rs) == 0 indicates a cross-package jump to a function that is not yet
@@ -308,7 +308,7 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 			if ldr.SymType(tramp) == 0 {
 				// trampoline does not exist, create one
 				trampb := ldr.MakeSymbolUpdater(tramp)
-				ctxt.AddTramp(trampb)
+				ctxt.AddTramp(trampb, ldr.SymType(s))
 				if ldr.SymType(rs) == sym.SDYNIMPORT {
 					if r.Add() != 0 {
 						ctxt.Errorf(s, "nonzero addend for DYNIMPORT call: %v+%d", ldr.SymName(rs), r.Add())

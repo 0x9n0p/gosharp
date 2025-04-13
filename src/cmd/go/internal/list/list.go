@@ -345,10 +345,9 @@ For more about modules, see https://golang.org/ref/mod.
 
 func init() {
 	CmdList.Run = runList // break init cycle
-	work.AddBuildFlags(CmdList, work.DefaultBuildFlags)
-	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
-		work.AddCoverFlags(CmdList, nil)
-	}
+	// Omit build -json because list has its own -json
+	work.AddBuildFlags(CmdList, work.OmitJSONFlag)
+	work.AddCoverFlags(CmdList, nil)
 	CmdList.Flag.Var(&listJsonFields, "json", "")
 }
 
@@ -642,7 +641,6 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		for _, p := range pkgs {
 			if len(p.TestGoFiles)+len(p.XTestGoFiles) > 0 {
 				var pmain, ptest, pxtest *load.Package
-				var err error
 				if *listE {
 					sema.Acquire(ctx, 1)
 					wg.Add(1)
@@ -652,9 +650,10 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 					}
 					pmain, ptest, pxtest = load.TestPackagesAndErrors(ctx, done, pkgOpts, p, nil)
 				} else {
-					pmain, ptest, pxtest, err = load.TestPackagesFor(ctx, pkgOpts, p, nil)
-					if err != nil {
-						base.Fatalf("go: can't load test package: %s", err)
+					var perr *load.Package
+					pmain, ptest, pxtest, perr = load.TestPackagesFor(ctx, pkgOpts, p, nil)
+					if perr != nil {
+						base.Fatalf("go: can't load test package: %s", perr.Error)
 					}
 				}
 				testPackages = append(testPackages, testPackageSet{p, pmain, ptest, pxtest})
@@ -727,7 +726,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		b.IsCmdList = true
 		b.NeedExport = *listExport
 		b.NeedCompiledGoFiles = *listCompiled
-		if cfg.Experiment.CoverageRedesign && cfg.BuildCover {
+		if cfg.BuildCover {
 			load.PrepareForCoverageBuild(pkgs)
 		}
 		a := &work.Action{}

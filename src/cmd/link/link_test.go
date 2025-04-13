@@ -16,9 +16,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
+	imacho "cmd/internal/macho"
+	"cmd/internal/objfile"
 	"cmd/internal/sys"
 )
 
@@ -386,7 +389,6 @@ func TestMachOBuildVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	found := false
-	const LC_BUILD_VERSION = 0x32
 	checkMin := func(ver uint32) {
 		major, minor, patch := (ver>>16)&0xff, (ver>>8)&0xff, (ver>>0)&0xff
 		if major < 11 {
@@ -396,7 +398,7 @@ func TestMachOBuildVersion(t *testing.T) {
 	for _, cmd := range exem.Loads {
 		raw := cmd.Raw()
 		type_ := exem.ByteOrder.Uint32(raw)
-		if type_ != LC_BUILD_VERSION {
+		if type_ != imacho.LC_BUILD_VERSION {
 			continue
 		}
 		osVer := exem.ByteOrder.Uint32(raw[12:])
@@ -408,6 +410,78 @@ func TestMachOBuildVersion(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no LC_BUILD_VERSION load command found")
+	}
+}
+
+func TestMachOUUID(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("this is only for darwin")
+	}
+
+	t.Parallel()
+
+	tmpdir := t.TempDir()
+
+	src := filepath.Join(tmpdir, "main.go")
+	err := os.WriteFile(src, []byte(trivialSrc), 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	extractUUID := func(exe string) string {
+		exem, err := macho.Open(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer exem.Close()
+		for _, cmd := range exem.Loads {
+			raw := cmd.Raw()
+			type_ := exem.ByteOrder.Uint32(raw)
+			if type_ != imacho.LC_UUID {
+				continue
+			}
+			return string(raw[8:24])
+		}
+		return ""
+	}
+
+	tests := []struct{ name, ldflags, expect string }{
+		{"default", "", "gobuildid"},
+		{"gobuildid", "-B=gobuildid", "gobuildid"},
+		{"specific", "-B=0x0123456789ABCDEF0123456789ABCDEF", "\x01\x23\x45\x67\x89\xAB\xCD\xEF\x01\x23\x45\x67\x89\xAB\xCD\xEF"},
+		{"none", "-B=none", ""},
+	}
+	if testenv.HasCGO() {
+		for _, test := range tests {
+			t1 := test
+			t1.name += "_external"
+			t1.ldflags += " -linkmode=external"
+			tests = append(tests, t1)
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			exe := filepath.Join(tmpdir, test.name)
+			cmd := testenv.Command(t, testenv.GoToolPath(t), "build", "-ldflags="+test.ldflags, "-o", exe, src)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %v:\n%s", cmd.Args, err, out)
+			}
+			uuid := extractUUID(exe)
+			if test.expect == "gobuildid" {
+				// Go buildid is not known in source code. Check UUID is present,
+				// and satisfies UUIDv3.
+				if uuid == "" {
+					t.Fatal("expect nonempty UUID, got empty")
+				}
+				// The version number is the high 4 bits of byte 6.
+				if uuid[6]>>4 != 3 {
+					t.Errorf("expect v3 UUID, got %X (version %d)", uuid, uuid[6]>>4)
+				}
+			} else if uuid != test.expect {
+				t.Errorf("UUID mismatch: got %X, want %X", uuid, test.expect)
+			}
+		})
 	}
 }
 
@@ -628,7 +702,6 @@ func TestFuncAlign(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build and run with old object file format.
 	cmd := testenv.Command(t, testenv.GoToolPath(t), "build", "-o", "falign")
 	cmd.Dir = tmpdir
 	out, err := cmd.CombinedOutput()
@@ -643,6 +716,87 @@ func TestFuncAlign(t *testing.T) {
 	if string(out) != "PASS" {
 		t.Errorf("unexpected output: %s\n", out)
 	}
+}
+
+const testFuncAlignOptionSrc = `
+package main
+//go:noinline
+func foo() {
+}
+//go:noinline
+func bar() {
+}
+//go:noinline
+func baz() {
+}
+func main() {
+	foo()
+	bar()
+	baz()
+}
+`
+
+// TestFuncAlignOption verifies that the -funcalign option changes the function alignment
+func TestFuncAlignOption(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	t.Parallel()
+
+	tmpdir := t.TempDir()
+
+	src := filepath.Join(tmpdir, "falign.go")
+	err := os.WriteFile(src, []byte(testFuncAlignOptionSrc), 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alignTest := func(align uint64) {
+		exeName := "falign.exe"
+		cmd := testenv.Command(t, testenv.GoToolPath(t), "build", "-ldflags=-funcalign="+strconv.FormatUint(align, 10), "-o", exeName, "falign.go")
+		cmd.Dir = tmpdir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("build failed: %v \n%s", err, out)
+		}
+		exe := filepath.Join(tmpdir, exeName)
+		cmd = testenv.Command(t, exe)
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("failed to run with err %v, output: %s", err, out)
+		}
+
+		// Check function alignment
+		f, err := objfile.Open(exe)
+		if err != nil {
+			t.Fatalf("failed to open file:%v\n", err)
+		}
+		defer f.Close()
+
+		fname := map[string]bool{"_main.foo": false,
+			"_main.bar": false,
+			"_main.baz": false}
+		syms, err := f.Symbols()
+		for _, s := range syms {
+			fn := s.Name
+			if _, ok := fname[fn]; !ok {
+				fn = "_" + s.Name
+				if _, ok := fname[fn]; !ok {
+					continue
+				}
+			}
+			if s.Addr%align != 0 {
+				t.Fatalf("unaligned function: %s %x. Expected alignment: %d\n", fn, s.Addr, align)
+			}
+			fname[fn] = true
+		}
+		for k, v := range fname {
+			if !v {
+				t.Fatalf("function %s not found\n", k)
+			}
+		}
+	}
+	alignTest(16)
+	alignTest(32)
 }
 
 const testTrampSrc = `
@@ -705,6 +859,14 @@ func TestTrampoline(t *testing.T) {
 		}
 		if string(out) != "hello\n" {
 			t.Errorf("unexpected output (%s):\n%s", mode, out)
+		}
+
+		out, err = testenv.Command(t, testenv.GoToolPath(t), "tool", "nm", exe).CombinedOutput()
+		if err != nil {
+			t.Errorf("nm failure: %s\n%s\n", err, string(out))
+		}
+		if ok, _ := regexp.Match("T runtime.deferreturn(\\+0)?-tramp0", out); !ok {
+			t.Errorf("Trampoline T runtime.deferreturn(+0)?-tramp0 is missing")
 		}
 	}
 }
@@ -1438,6 +1600,8 @@ func TestCheckLinkname(t *testing.T) {
 		{"coro_asm", false},
 		// pull-only linkname is not ok
 		{"coro2.go", false},
+		// pull linkname of a builtin symbol is not ok
+		{"builtin.go", false},
 		// legacy bad linkname is ok, for now
 		{"fastrand.go", true},
 		{"badlinkname.go", true},
@@ -1457,5 +1621,55 @@ func TestCheckLinkname(t *testing.T) {
 				t.Errorf("build succeeded unexpectedly: %v:\n%s", err, out)
 			}
 		})
+	}
+}
+
+func TestLinknameBSS(t *testing.T) {
+	// Test that the linker chooses the right one as the definition
+	// for linknamed variables. See issue #72032.
+	testenv.MustHaveGoBuild(t)
+	t.Parallel()
+
+	tmpdir := t.TempDir()
+
+	src := filepath.Join("testdata", "linkname", "sched.go")
+	exe := filepath.Join(tmpdir, "sched.exe")
+	cmd := testenv.Command(t, testenv.GoToolPath(t), "build", "-o", exe, src)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build failed unexpectedly: %v:\n%s", err, out)
+	}
+
+	// Check the symbol size.
+	f, err := objfile.Open(exe)
+	if err != nil {
+		t.Fatalf("fail to open executable: %v", err)
+	}
+	defer f.Close()
+	syms, err := f.Symbols()
+	if err != nil {
+		t.Fatalf("fail to get symbols: %v", err)
+	}
+	found := false
+	for _, s := range syms {
+		if s.Name == "runtime.sched" || s.Name == "_runtime.sched" {
+			found = true
+			if s.Size < 100 {
+				// As of Go 1.25 (Mar 2025), runtime.sched has 6848 bytes on
+				// darwin/arm64. It should always be larger than 100 bytes on
+				// all platforms.
+				t.Errorf("runtime.sched symbol size too small: want > 100, got %d", s.Size)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("runtime.sched symbol not found")
+	}
+
+	// Executable should run.
+	cmd = testenv.Command(t, exe)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("executable failed to run: %v\n%s", err, out)
 	}
 }

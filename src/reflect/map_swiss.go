@@ -8,14 +8,16 @@ package reflect
 
 import (
 	"internal/abi"
+	"internal/race"
 	"internal/runtime/maps"
+	"internal/runtime/sys"
 	"unsafe"
 )
 
 // mapType represents a map type.
-type mapType struct {
-	abi.SwissMapType
-}
+//
+// TODO(prattmic): Only used within this file, could be cleaned up.
+type mapType = abi.SwissMapType
 
 func (t *rtype) Key() Type {
 	if t.Kind() != Map {
@@ -71,15 +73,21 @@ func MapOf(key, elem Type) Type {
 	mt.Hasher = func(p unsafe.Pointer, seed uintptr) uintptr {
 		return typehash(ktyp, p, seed)
 	}
+	mt.GroupSize = mt.Group.Size()
 	mt.SlotSize = slot.Size()
 	mt.ElemOff = slot.Field(1).Offset
 	mt.Flags = 0
-	// TODO(prattmic): indirect key/elem flags
 	if needKeyUpdate(ktyp) {
 		mt.Flags |= abi.SwissMapNeedKeyUpdate
 	}
 	if hashMightPanic(ktyp) {
 		mt.Flags |= abi.SwissMapHashMightPanic
+	}
+	if ktyp.Size_ > abi.SwissMapMaxKeyBytes {
+		mt.Flags |= abi.SwissMapIndirectKey
+	}
+	if etyp.Size_ > abi.SwissMapMaxKeyBytes {
+		mt.Flags |= abi.SwissMapIndirectElem
 	}
 	mt.PtrToThis = 0
 
@@ -88,8 +96,6 @@ func MapOf(key, elem Type) Type {
 }
 
 func groupAndSlotOf(ktyp, etyp Type) (Type, Type) {
-	// TODO(prattmic): indirect key/elem flags
-
 	// type group struct {
 	//     ctrl uint64
 	//     slots [abi.SwissMapGroupSlots]struct {
@@ -97,6 +103,13 @@ func groupAndSlotOf(ktyp, etyp Type) (Type, Type) {
 	//         elem elemType
 	//     }
 	// }
+
+	if ktyp.Size() > abi.SwissMapMaxKeyBytes {
+		ktyp = PointerTo(ktyp)
+	}
+	if etyp.Size() > abi.SwissMapMaxElemBytes {
+		etyp = PointerTo(etyp)
+	}
 
 	fields := []StructField{
 		{
@@ -143,9 +156,7 @@ func (v Value) MapIndex(key Value) Value {
 	// of unexported fields.
 
 	var e unsafe.Pointer
-	// TODO(#54766): temporarily disable specialized variants.
-	//if (tt.Key == stringType || key.kind() == String) && tt.Key == key.typ() && tt.Elem.Size() <= abi.SwissMapMaxElemBytes {
-	if false {
+	if (tt.Key == stringType || key.kind() == String) && tt.Key == key.typ() && tt.Elem.Size() <= abi.SwissMapMaxElemBytes {
 		k := *(*string)(key.ptr)
 		e = mapaccess_faststr(v.typ(), v.pointer(), k)
 	} else {
@@ -167,6 +178,31 @@ func (v Value) MapIndex(key Value) Value {
 	return copyVal(typ, fl, e)
 }
 
+// Equivalent to runtime.mapIterStart.
+//
+//go:noinline
+func mapIterStart(t *abi.SwissMapType, m *maps.Map, it *maps.Iter) {
+	if race.Enabled && m != nil {
+		callerpc := sys.GetCallerPC()
+		race.ReadPC(unsafe.Pointer(m), callerpc, abi.FuncPCABIInternal(mapIterStart))
+	}
+
+	it.Init(t, m)
+	it.Next()
+}
+
+// Equivalent to runtime.mapIterNext.
+//
+//go:noinline
+func mapIterNext(it *maps.Iter) {
+	if race.Enabled {
+		callerpc := sys.GetCallerPC()
+		race.ReadPC(unsafe.Pointer(it.Map()), callerpc, abi.FuncPCABIInternal(mapIterNext))
+	}
+
+	it.Next()
+}
+
 // MapKeys returns a slice containing all the keys present in the map,
 // in unspecified order.
 // It panics if v's Kind is not [Map].
@@ -178,13 +214,17 @@ func (v Value) MapKeys() []Value {
 
 	fl := v.flag.ro() | flag(keyType.Kind())
 
-	m := v.pointer()
+	// Escape analysis can't see that the map doesn't escape. It sees an
+	// escape from maps.IterStart, via assignment into it, even though it
+	// doesn't escape this function.
+	mptr := abi.NoEscape(v.pointer())
+	m := (*maps.Map)(mptr)
 	mlen := int(0)
 	if m != nil {
-		mlen = maplen(m)
+		mlen = maplen(mptr)
 	}
 	var it maps.Iter
-	mapiterinit(v.typ(), m, &it)
+	mapIterStart(tt, m, &it)
 	a := make([]Value, mlen)
 	var i int
 	for i = 0; i < len(a); i++ {
@@ -196,7 +236,7 @@ func (v Value) MapKeys() []Value {
 			break
 		}
 		a[i] = copyVal(keyType, fl, key)
-		mapiternext(&it)
+		mapIterNext(&it)
 	}
 	return a[:i]
 }
@@ -231,6 +271,7 @@ func (iter *MapIter) Key() Value {
 // It is equivalent to v.Set(iter.Key()), but it avoids allocating a new Value.
 // As in Go, the key must be assignable to v's type and
 // must not be derived from an unexported field.
+// It panics if [Value.CanSet] returns false.
 func (v Value) SetIterKey(iter *MapIter) {
 	if !iter.hiter.Initialized() {
 		panic("reflect: Value.SetIterKey called before Next")
@@ -274,6 +315,7 @@ func (iter *MapIter) Value() Value {
 // It is equivalent to v.Set(iter.Value()), but it avoids allocating a new Value.
 // As in Go, the value must be assignable to v's type and
 // must not be derived from an unexported field.
+// It panics if [Value.CanSet] returns false.
 func (v Value) SetIterValue(iter *MapIter) {
 	if !iter.hiter.Initialized() {
 		panic("reflect: Value.SetIterValue called before Next")
@@ -306,12 +348,14 @@ func (iter *MapIter) Next() bool {
 		panic("MapIter.Next called on an iterator that does not have an associated map Value")
 	}
 	if !iter.hiter.Initialized() {
-		mapiterinit(iter.m.typ(), iter.m.pointer(), &iter.hiter)
+		t := (*mapType)(unsafe.Pointer(iter.m.typ()))
+		m := (*maps.Map)(iter.m.pointer())
+		mapIterStart(t, m, &iter.hiter)
 	} else {
 		if iter.hiter.Key() == nil {
 			panic("MapIter.Next called on exhausted iterator")
 		}
-		mapiternext(&iter.hiter)
+		mapIterNext(&iter.hiter)
 	}
 	return iter.hiter.Key() != nil
 }
@@ -366,9 +410,7 @@ func (v Value) SetMapIndex(key, elem Value) {
 	key.mustBeExported()
 	tt := (*mapType)(unsafe.Pointer(v.typ()))
 
-	// TODO(#54766): temporarily disable specialized variants.
-	//if (tt.Key == stringType || key.kind() == String) && tt.Key == key.typ() && tt.Elem.Size() <= abi.SwissMapMaxElemBytes {
-	if false {
+	if (tt.Key == stringType || key.kind() == String) && tt.Key == key.typ() && tt.Elem.Size() <= abi.SwissMapMaxElemBytes {
 		k := *(*string)(key.ptr)
 		if elem.typ() == nil {
 			mapdelete_faststr(v.typ(), v.pointer(), k)

@@ -225,6 +225,7 @@ func TestLargeHashes(t *testing.T) {
 }
 
 func TestAllocations(t *testing.T) {
+	cryptotest.SkipTestAllocations(t)
 	in := []byte("hello, world!")
 	out := make([]byte, 0, Size)
 	h := New()
@@ -240,6 +241,11 @@ func TestAllocations(t *testing.T) {
 
 func TestMD5Hash(t *testing.T) {
 	cryptotest.TestHash(t, New)
+}
+
+func TestExtraMethods(t *testing.T) {
+	h := New()
+	cryptotest.NoExtraMethods(t, &h, "MarshalBinary", "UnmarshalBinary", "AppendBinary")
 }
 
 var bench = New()

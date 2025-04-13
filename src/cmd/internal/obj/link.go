@@ -98,7 +98,8 @@ import (
 //			val = string
 //
 //	<symbolic constant name>
-//		Special symbolic constants for ARM64, such as conditional flags, tlbi_op and so on.
+//		Special symbolic constants for ARM64 (such as conditional flags, tlbi_op and so on)
+//		and RISCV64 (such as names for vector configuration instruction arguments).
 //		Encoding:
 //			type = TYPE_SPECIAL
 //			offset = The constant value corresponding to this symbol
@@ -180,14 +181,16 @@ import (
 //			offset = ((reg&31) << 16) | (exttype << 13) | (amount<<10)
 //
 //	reg.<T>
-//		Register arrangement for ARM64 SIMD register
-//		e.g.: V1.S4, V2.S2, V7.D2, V2.H4, V6.B16
+//		Register arrangement for ARM64 and Loong64 SIMD register
+//		e.g.:
+//			On ARM64: V1.S4, V2.S2, V7.D2, V2.H4, V6.B16
+//			On Loong64: X1.B32, X1.H16, X1.W8, X2.V4, X1.Q1, V1.B16, V1.H8, V1.W4, V1.V2
 //		Encoding:
 //			type = TYPE_REG
 //			reg = REG_ARNG + register + arrangement
 //
 //	reg.<T>[index]
-//		Register element for ARM64
+//		Register element for ARM64 and Loong64
 //		Encoding:
 //			type = TYPE_REG
 //			reg = REG_ELEM + register + arrangement
@@ -601,6 +604,22 @@ func (s *LSym) NewTypeInfo() *TypeInfo {
 	return t
 }
 
+// An ItabInfo contains information for a symbol
+// that contains a runtime.itab.
+type ItabInfo struct {
+	Type interface{} // a *cmd/compile/internal/types.Type
+}
+
+func (s *LSym) NewItabInfo() *ItabInfo {
+	if s.Extra != nil {
+		panic(fmt.Sprintf("invalid use of LSym - NewItabInfo with Extra of type %T", *s.Extra))
+	}
+	t := new(ItabInfo)
+	s.Extra = new(interface{})
+	*s.Extra = t
+	return t
+}
+
 // WasmImport represents a WebAssembly (WASM) imported function with
 // parameters and results translated into WASM types based on the Go function
 // declaration.
@@ -762,6 +781,10 @@ const (
 	WasmF32
 	WasmF64
 	WasmPtr
+
+	// bool is not really a wasm type, but we allow it on wasmimport/wasmexport
+	// function parameters/results. 32-bit on Wasm side, 8-bit on Go side.
+	WasmBool
 )
 
 type InlMark struct {
@@ -1100,6 +1123,7 @@ type Auto struct {
 type RegSpill struct {
 	Addr           Addr
 	Reg            int16
+	Reg2           int16 // If not 0, a second register to spill at Addr+regSize. Only for some archs.
 	Spill, Unspill As
 }
 
@@ -1134,10 +1158,11 @@ type Link struct {
 	PosTable           src.PosTable
 	InlTree            InlTree // global inlining tree used by gc/inl.go
 	DwFixups           *DwarfFixupTable
+	DwTextCount        int
 	Imports            []goobj.ImportedPkg
 	DiagFunc           func(string, ...interface{})
 	DiagFlush          func()
-	DebugInfo          func(fn *LSym, info *LSym, curfn Func) ([]dwarf.Scope, dwarf.InlCalls)
+	DebugInfo          func(ctxt *Link, fn *LSym, info *LSym, curfn Func) ([]dwarf.Scope, dwarf.InlCalls)
 	GenAbstractFunc    func(fn *LSym)
 	Errors             int
 
@@ -1192,6 +1217,10 @@ func (fi *FuncInfo) SpillRegisterArgs(last *Prog, pa ProgAlloc) *Prog {
 		spill.As = ra.Spill
 		spill.From.Type = TYPE_REG
 		spill.From.Reg = ra.Reg
+		if ra.Reg2 != 0 {
+			spill.From.Type = TYPE_REGREG
+			spill.From.Offset = int64(ra.Reg2)
+		}
 		spill.To = ra.Addr
 		last = spill
 	}
@@ -1208,6 +1237,10 @@ func (fi *FuncInfo) UnspillRegisterArgs(last *Prog, pa ProgAlloc) *Prog {
 		unspill.From = ra.Addr
 		unspill.To.Type = TYPE_REG
 		unspill.To.Reg = ra.Reg
+		if ra.Reg2 != 0 {
+			unspill.To.Type = TYPE_REGREG
+			unspill.To.Offset = int64(ra.Reg2)
+		}
 		last = unspill
 	}
 	return last

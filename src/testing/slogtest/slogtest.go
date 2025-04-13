@@ -172,6 +172,22 @@ var cases = []testCase{
 		},
 	},
 	{
+		name:        "nested-empty-group-record",
+		explanation: withSource("a Handler should not output nested groups if there are no attributes"),
+		f: func(l *slog.Logger) {
+			l.With("a", "b").WithGroup("G").With("c", "d").WithGroup("H").WithGroup("I").Info("msg")
+		},
+		checks: []check{
+			hasKey(slog.TimeKey),
+			hasKey(slog.LevelKey),
+			hasAttr(slog.MessageKey, "msg"),
+			hasAttr("a", "b"),
+			inGroup("G", hasAttr("c", "d")),
+			inGroup("G", missingKey("H")),
+			inGroup("G", missingKey("I")),
+		},
+	},
+	{
 		name:        "resolve",
 		explanation: withSource("a Handler should call Resolve on attribute values"),
 		f: func(l *slog.Logger) {
@@ -265,7 +281,7 @@ func TestHandler(h slog.Handler, results func() []map[string]any) error {
 	if g, w := len(res), len(cases); g != w {
 		return fmt.Errorf("got %d results, want %d", g, w)
 	}
-	for i, got := range results() {
+	for i, got := range res {
 		c := cases[i]
 		for _, check := range c.checks {
 			if problem := check(got); problem != "" {

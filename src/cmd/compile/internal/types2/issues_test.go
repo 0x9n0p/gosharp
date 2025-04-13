@@ -627,38 +627,62 @@ func TestIssue50646(t *testing.T) {
 
 func TestIssue55030(t *testing.T) {
 	// makeSig makes the signature func(typ...)
-	makeSig := func(typ Type) {
-		par := NewVar(nopos, nil, "", typ)
+	// If valid is not set, making that signature is expected to panic.
+	makeSig := func(typ Type, valid bool) {
+		if !valid {
+			defer func() {
+				if recover() == nil {
+					panic("NewSignatureType panic expected")
+				}
+			}()
+		}
+		par := NewParam(nopos, nil, "", typ)
 		params := NewTuple(par)
 		NewSignatureType(nil, nil, nil, params, nil, true)
 	}
 
 	// makeSig must not panic for the following (example) types:
 	// []int
-	makeSig(NewSlice(Typ[Int]))
+	makeSig(NewSlice(Typ[Int]), true)
 
 	// string
-	makeSig(Typ[String])
+	makeSig(Typ[String], true)
 
-	// P where P's core type is string
+	// P where P's common underlying type is string
 	{
 		P := NewTypeName(nopos, nil, "P", nil) // [P string]
-		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{Typ[String]})))
+		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{Typ[String]})), true)
 	}
 
-	// P where P's core type is an (unnamed) slice
+	// P where P's common underlying type is an (unnamed) slice
 	{
 		P := NewTypeName(nopos, nil, "P", nil) // [P []int]
-		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{NewSlice(Typ[Int])})))
+		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{NewSlice(Typ[Int])})), true)
 	}
 
-	// P where P's core type is bytestring (i.e., string or []byte)
+	// P where P's type set contains strings and []byte
 	{
 		t1 := NewTerm(true, Typ[String])          // ~string
 		t2 := NewTerm(false, NewSlice(Typ[Byte])) // []byte
 		u := NewUnion([]*Term{t1, t2})            // ~string | []byte
 		P := NewTypeName(nopos, nil, "P", nil)    // [P ~string | []byte]
-		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{u})))
+		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{u})), true)
+	}
+
+	// makeSig must panic for the following (example) types:
+	// int
+	makeSig(Typ[Int], false)
+
+	// P where P's type set doesn't have any specific types
+	{
+		P := NewTypeName(nopos, nil, "P", nil) // [P any]
+		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{Universe.Lookup("any").Type()})), false)
+	}
+
+	// P where P's type set doesn't have any slice or string types
+	{
+		P := NewTypeName(nopos, nil, "P", nil) // [P any]
+		makeSig(NewTypeParam(P, NewInterfaceType(nil, []Type{Typ[Int]})), false)
 	}
 }
 
@@ -729,7 +753,7 @@ var _ I0 = b.S{}
 type S struct{}
 func (S) M0(struct{ f string }) {}
 `,
-			`6:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I0 value in variable declaration: b[.]S does not implement I0 [(]wrong type for method M0[)]
+			`6:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I0 value in variable declaration: b[.]S does not implement I0 [(]wrong type for method M0[)]
 .*have M0[(]struct{f string /[*] package b [*]/ }[)]
 .*want M0[(]struct{f string /[*] package main [*]/ }[)]`},
 
@@ -745,7 +769,7 @@ var _ I1 = b.S{}
 type S struct{}
 func (S) M1(struct{ string }) {}
 `,
-			`6:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I1 value in variable declaration: b[.]S does not implement I1 [(]wrong type for method M1[)]
+			`6:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I1 value in variable declaration: b[.]S does not implement I1 [(]wrong type for method M1[)]
 .*have M1[(]struct{string /[*] package b [*]/ }[)]
 .*want M1[(]struct{string /[*] package main [*]/ }[)]`},
 
@@ -761,7 +785,7 @@ var _ I2 = b.S{}
 type S struct{}
 func (S) M2(struct{ f struct{ f string } }) {}
 `,
-			`6:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I2 value in variable declaration: b[.]S does not implement I2 [(]wrong type for method M2[)]
+			`6:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I2 value in variable declaration: b[.]S does not implement I2 [(]wrong type for method M2[)]
 .*have M2[(]struct{f struct{f string} /[*] package b [*]/ }[)]
 .*want M2[(]struct{f struct{f string} /[*] package main [*]/ }[)]`},
 
@@ -777,7 +801,7 @@ var _ I3 = b.S{}
 type S struct{}
 func (S) M3(struct{ F struct{ f string } }) {}
 `,
-			`6:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I3 value in variable declaration: b[.]S does not implement I3 [(]wrong type for method M3[)]
+			`6:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I3 value in variable declaration: b[.]S does not implement I3 [(]wrong type for method M3[)]
 .*have M3[(]struct{F struct{f string /[*] package b [*]/ }}[)]
 .*want M3[(]struct{F struct{f string /[*] package main [*]/ }}[)]`},
 
@@ -793,7 +817,7 @@ var _ I4 = b.S{}
 type S struct{}
 func (S) M4(struct { *string }) {}
 `,
-			`6:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I4 value in variable declaration: b[.]S does not implement I4 [(]wrong type for method M4[)]
+			`6:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I4 value in variable declaration: b[.]S does not implement I4 [(]wrong type for method M4[)]
 .*have M4[(]struct{[*]string /[*] package b [*]/ }[)]
 .*want M4[(]struct{[*]string /[*] package main [*]/ }[)]`},
 
@@ -811,7 +835,7 @@ type S struct{}
 type t struct{ A int }
 func (S) M5(struct {S;t}) {}
 `,
-			`7:12: cannot use b[.]S{} [(]value of type b[.]S[)] as I5 value in variable declaration: b[.]S does not implement I5 [(]wrong type for method M5[)]
+			`7:12: cannot use b[.]S{} [(]value of struct type b[.]S[)] as I5 value in variable declaration: b[.]S does not implement I5 [(]wrong type for method M5[)]
 .*have M5[(]struct{b[.]S; b[.]t}[)]
 .*want M5[(]struct{b[.]S; t}[)]`},
 	}
@@ -838,24 +862,19 @@ func (S) M5(struct {S;t}) {}
 func TestIssue59944(t *testing.T) {
 	testenv.MustHaveCGO(t)
 
-	// The typechecker should resolve methods declared on aliases of cgo types.
-	const src = `
+	// Methods declared on aliases of cgo types are not permitted.
+	const src = `// -gotypesalias=1
+
 package p
 
 /*
-struct layout {
-	int field;
-};
+struct layout {};
 */
 import "C"
 
 type Layout = C.struct_layout
 
-func (l *Layout) Binding() {}
-
-func _() {
-	_ = (*Layout).Binding
-}
+func (*Layout /* ERROR "cannot define new methods on non-local type Layout" */) Binding() {}
 `
 
 	// code generated by cmd/cgo for the above source.
@@ -878,10 +897,12 @@ func _Cgo_ptr(ptr unsafe.Pointer) unsafe.Pointer { return ptr }
 var _Cgo_always_false bool
 //go:linkname _Cgo_use runtime.cgoUse
 func _Cgo_use(interface{})
-type _Ctype_int int32
-
+//go:linkname _Cgo_keepalive runtime.cgoKeepAlive
+//go:noescape
+func _Cgo_keepalive(interface{})
+//go:linkname _Cgo_no_callback runtime.cgoNoCallback
+func _Cgo_no_callback(bool)
 type _Ctype_struct_layout struct {
-	field _Ctype_int
 }
 
 type _Ctype_void [0]byte
@@ -890,9 +911,11 @@ type _Ctype_void [0]byte
 func _cgo_runtime_cgocall(unsafe.Pointer, uintptr) int32
 
 //go:linkname _cgoCheckPointer runtime.cgoCheckPointer
+//go:noescape
 func _cgoCheckPointer(interface{}, interface{})
 
 //go:linkname _cgoCheckResult runtime.cgoCheckResult
+//go:noescape
 func _cgoCheckResult(interface{})
 `
 	testFiles(t, []string{"p.go", "_cgo_gotypes.go"}, [][]byte{[]byte(src), []byte(cgoTypes)}, 0, false, func(cfg *Config) {

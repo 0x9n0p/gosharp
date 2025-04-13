@@ -52,6 +52,13 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	cgocheck mode can be enabled using GOEXPERIMENT (which
 	requires a rebuild), see https://pkg.go.dev/internal/goexperiment for details.
 
+	decoratemappings: controls whether the Go runtime annotates OS
+	anonymous memory mappings with context about their purpose. These
+	annotations appear in /proc/self/maps and /proc/self/smaps as
+	"[anon: Go: ...]". This setting is only used on Linux. For Go 1.25, it
+	defaults to `decoratemappings=1`, enabling annotations. Using
+	`decoratemappings=0` reverts to the pre-Go 1.25 behavior.
+
 	disablethp: setting disablethp=1 on Linux disables transparent huge pages for the heap.
 	It has no effect on other platforms. disablethp is meant for compatibility with versions
 	of Go before 1.21, which stopped working around a Linux kernel default that can result
@@ -294,10 +301,11 @@ import (
 
 // Caller reports file and line number information about function invocations on
 // the calling goroutine's stack. The argument skip is the number of stack frames
-// to ascend, with 0 identifying the caller of Caller.  (For historical reasons the
-// meaning of skip differs between Caller and [Callers].) The return values report the
-// program counter, file name, and line number within the file of the corresponding
-// call. The boolean ok is false if it was not possible to recover the information.
+// to ascend, with 0 identifying the caller of Caller. (For historical reasons the
+// meaning of skip differs between Caller and [Callers].) The return values report
+// the program counter, the file name (using forward slashes as path separator, even
+// on Windows), and the line number within the file of the corresponding call.
+// The boolean ok is false if it was not possible to recover the information.
 func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	rpc := make([]uintptr, 1)
 	n := callers(skip+1, rpc)

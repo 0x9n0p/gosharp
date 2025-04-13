@@ -1374,8 +1374,7 @@ func TestConnQuery(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1402,8 +1401,7 @@ func TestConnRaw(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1518,8 +1516,7 @@ func TestInvalidNilValues(t *testing.T) {
 			db := newTestDB(t, "people")
 			defer closeDB(t, db)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			conn, err := db.Conn(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -1547,8 +1544,7 @@ func TestConnTx(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2793,8 +2789,7 @@ func TestManyErrBadConn(t *testing.T) {
 	// Conn
 	db = manyErrBadConnSetup()
 	defer closeDB(t, db)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -2935,8 +2930,7 @@ func TestConnExpiresFreshOutOfPool(t *testing.T) {
 	}
 	defer func() { nowFunc = time.Now }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	db := newTestDB(t, "magicquery")
 	defer closeDB(t, db)
@@ -3786,8 +3780,7 @@ func TestIssue20647(t *testing.T) {
 	db := newTestDB(t, "people")
 	defer closeDB(t, db)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -4142,9 +4135,7 @@ func TestNamedValueChecker(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := t.Context()
 	_, err = db.ExecContext(ctx, "WIPE")
 	if err != nil {
 		t.Fatal("exec wipe", err)
@@ -4192,9 +4183,7 @@ func TestNamedValueCheckerSkip(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := t.Context()
 	_, err = db.ExecContext(ctx, "WIPE")
 	if err != nil {
 		t.Fatal("exec wipe", err)
@@ -4305,8 +4294,7 @@ func TestQueryExecContextOnly(t *testing.T) {
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -4955,5 +4943,52 @@ func BenchmarkConnRequestSet(b *testing.B) {
 		if _, ok := s.TakeRandom(); ok {
 			b.Fatal("unexpected ok")
 		}
+	}
+}
+
+func TestIssue69837(t *testing.T) {
+	u := Null[uint]{V: 1, Valid: true}
+	val, err := driver.DefaultParameterConverter.ConvertValue(u)
+	if err != nil {
+		t.Errorf("ConvertValue() error = %v, want nil", err)
+	}
+
+	if v, ok := val.(int64); !ok {
+		t.Errorf("val.(type): got %T, expected int64", val)
+	} else if v != 1 {
+		t.Errorf("val: got %d, expected 1", v)
+	}
+}
+
+type issue69728Type struct {
+	ID   int
+	Name string
+}
+
+func (t issue69728Type) Value() (driver.Value, error) {
+	return []byte(fmt.Sprintf("%d, %s", t.ID, t.Name)), nil
+}
+
+func TestIssue69728(t *testing.T) {
+	forValue := Null[issue69728Type]{
+		Valid: true,
+		V: issue69728Type{
+			ID:   42,
+			Name: "foobar",
+		},
+	}
+
+	v1, err := forValue.Value()
+	if err != nil {
+		t.Errorf("forValue.Value() error = %v, want nil", err)
+	}
+
+	v2, err := forValue.V.Value()
+	if err != nil {
+		t.Errorf("forValue.V.Value() error = %v, want nil", err)
+	}
+
+	if !reflect.DeepEqual(v1, v2) {
+		t.Errorf("not equal; v1 = %v, v2 = %v", v1, v2)
 	}
 }

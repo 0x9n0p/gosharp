@@ -44,7 +44,7 @@ func _() {
 	for i, j /* ERROR "range over 10 (untyped int constant) permits only one iteration variable" */ := range 10 {
 		_, _ = i, j
 	}
-	for i = range MyInt /* ERROR "cannot use MyInt(10) (constant 10 of type MyInt) as int value in range clause" */ (10) {
+	for i = range MyInt /* ERROR "cannot use MyInt(10) (constant 10 of int32 type MyInt) as int value in range clause" */ (10) {
 		_ = i
 	}
 	for mi := range MyInt(10) {
@@ -56,12 +56,12 @@ func _() {
 }
 
 func _[T int | string](x T) {
-	for range x /* ERROR "cannot range over x (variable of type T constrained by int | string): no core type" */ {
+	for range x /* ERROR "cannot range over x (variable of type T constrained by int | string): int and string have different underlying types" */ {
 	}
 }
 
 func _[T int | int64](x T) {
-	for range x /* ERROR "cannot range over x (variable of type T constrained by int | int64): no core type" */ {
+	for range x /* ERROR "cannot range over x (variable of type T constrained by int | int64): int and int64 have different underlying types" */ {
 	}
 }
 

@@ -306,9 +306,8 @@ func (check *Checker) cycleError(cycle []Object, start int) {
 		return packagePrefix(obj.Pkg(), check.qualifier) + obj.Name()
 	}
 
-	obj := cycle[start]
-	objName := name(obj)
 	// If obj is a type alias, mark it as valid (not broken) in order to avoid follow-on errors.
+	obj := cycle[start]
 	tname, _ := obj.(*TypeName)
 	if tname != nil && tname.IsAlias() {
 		// If we use Alias nodes, it is initialized with Typ[Invalid].
@@ -321,30 +320,25 @@ func (check *Checker) cycleError(cycle []Object, start int) {
 	// report a more concise error for self references
 	if len(cycle) == 1 {
 		if tname != nil {
-			check.errorf(obj, InvalidDeclCycle, "invalid recursive type: %s refers to itself", objName)
+			check.errorf(obj, InvalidDeclCycle, "invalid recursive type: %s refers to itself", name(obj))
 		} else {
-			check.errorf(obj, InvalidDeclCycle, "invalid cycle in declaration: %s refers to itself", objName)
+			check.errorf(obj, InvalidDeclCycle, "invalid cycle in declaration: %s refers to itself", name(obj))
 		}
 		return
 	}
 
 	err := check.newError(InvalidDeclCycle)
 	if tname != nil {
-		err.addf(obj, "invalid recursive type %s", objName)
+		err.addf(obj, "invalid recursive type %s", name(obj))
 	} else {
-		err.addf(obj, "invalid cycle in declaration of %s", objName)
+		err.addf(obj, "invalid cycle in declaration of %s", name(obj))
 	}
-	i := start
-	for range cycle {
-		err.addf(obj, "%s refers to", objName)
-		i++
-		if i >= len(cycle) {
-			i = 0
-		}
-		obj = cycle[i]
-		objName = name(obj)
+	// "cycle[i] refers to cycle[j]" for (i,j) = (s,s+1), (s+1,s+2), ..., (n-1,0), (0,1), ..., (s-1,s) for len(cycle) = n, s = start.
+	for i := range cycle {
+		next := cycle[(start+i+1)%len(cycle)]
+		err.addf(obj, "%s refers to %s", name(obj), name(next))
+		obj = next
 	}
-	err.addf(obj, "%s", objName)
 	err.report()
 }
 
@@ -850,7 +844,7 @@ func (check *Checker) declStmt(list []syntax.Decl) {
 
 			lhs0 := make([]*Var, len(s.NameList))
 			for i, name := range s.NameList {
-				lhs0[i] = NewVar(name.Pos(), pkg, name.Value, nil)
+				lhs0[i] = newVar(LocalVar, name.Pos(), pkg, name.Value, nil)
 			}
 
 			// initialize all variables

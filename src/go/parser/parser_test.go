@@ -632,6 +632,7 @@ var parseDepthTests = []struct {
 	{name: "go", format: "package main; func main() { «go func() { «» }()» }", parseMultiplier: 2, scope: true},                      // Parser nodes: GoStmt, FuncLit
 	{name: "defer", format: "package main; func main() { «defer func() { «» }()» }", parseMultiplier: 2, scope: true},                // Parser nodes: DeferStmt, FuncLit
 	{name: "select", format: "package main; func main() { «select { default: «» }» }", scope: true},
+	{name: "block", format: "package main; func main() { «{«»}» }", scope: true},
 }
 
 // split splits pre«mid»post into pre, mid, post.
@@ -836,5 +837,25 @@ func TestParseTypeParamsAsParenExpr(t *testing.T) {
 	_, ok := typeParam.(*ast.ParenExpr)
 	if !ok {
 		t.Fatalf("typeParam is a %T; want: *ast.ParenExpr", typeParam)
+	}
+}
+
+// TestEmptyFileHasValidStartEnd is a regression test for #70162.
+func TestEmptyFileHasValidStartEnd(t *testing.T) {
+	for _, test := range []struct {
+		src  string
+		want string // "Pos() FileStart FileEnd"
+	}{
+		{src: "", want: "0 1 1"},
+		{src: "package ", want: "0 1 9"},
+		{src: "package p", want: "1 1 10"},
+		{src: "type T int", want: "0 1 11"},
+	} {
+		fset := token.NewFileSet()
+		f, _ := ParseFile(fset, "a.go", test.src, 0)
+		got := fmt.Sprintf("%d %d %d", f.Pos(), f.FileStart, f.FileEnd)
+		if got != test.want {
+			t.Fatalf("src = %q: got %s, want %s", test.src, got, test.want)
+		}
 	}
 }

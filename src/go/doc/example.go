@@ -192,13 +192,6 @@ func playExample(file *ast.File, f *ast.FuncDecl) *ast.File {
 	// Find unresolved identifiers and uses of top-level declarations.
 	depDecls, unresolved := findDeclsAndUnresolved(body, topDecls, typMethods)
 
-	// Remove predeclared identifiers from unresolved list.
-	for n := range unresolved {
-		if predeclaredTypes[n] || predeclaredConstants[n] || predeclaredFuncs[n] {
-			delete(unresolved, n)
-		}
-	}
-
 	// Use unresolved identifiers to determine the imports used by this
 	// example. The heuristic assumes package names match base import
 	// paths for imports w/o renames (should be good enough most of the time).
@@ -247,6 +240,13 @@ func playExample(file *ast.File, f *ast.FuncDecl) *ast.File {
 			spec.Path = &path
 			spec.Path.ValuePos = groupStart(&spec)
 			namedImports = append(namedImports, &spec)
+			delete(unresolved, n)
+		}
+	}
+
+	// Remove predeclared identifiers from unresolved list.
+	for n := range unresolved {
+		if predeclaredTypes[n] || predeclaredConstants[n] || predeclaredFuncs[n] {
 			delete(unresolved, n)
 		}
 	}
@@ -491,17 +491,14 @@ func findDeclsAndUnresolved(body ast.Node, topDecls map[*ast.Object]ast.Decl, ty
 }
 
 func hasIota(s ast.Spec) bool {
-	has := false
-	ast.Inspect(s, func(n ast.Node) bool {
+	for n := range ast.Preorder(s) {
 		// Check that this is the special built-in "iota" identifier, not
 		// a user-defined shadow.
 		if id, ok := n.(*ast.Ident); ok && id.Name == "iota" && id.Obj == nil {
-			has = true
-			return false
+			return true
 		}
-		return true
-	})
-	return has
+	}
+	return false
 }
 
 // findImportGroupStarts finds the start positions of each sequence of import

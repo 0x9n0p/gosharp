@@ -10,6 +10,7 @@ import (
 	"fmt"
 	. "internal/types/errors"
 	"slices"
+	"sort"
 )
 
 // initOrder computes the Info.InitOrder for package variables.
@@ -139,7 +140,16 @@ func findPath(objMap map[Object]*declInfo, from, to Object, seen map[Object]bool
 	}
 	seen[from] = true
 
+	// sort deps for deterministic result
+	var deps []Object
 	for d := range objMap[from].deps {
+		deps = append(deps, d)
+	}
+	sort.Slice(deps, func(i, j int) bool {
+		return deps[i].order() < deps[j].order()
+	})
+
+	for _, d := range deps {
 		if d == to {
 			return []Object{d}
 		}
@@ -163,13 +173,12 @@ func (check *Checker) reportCycle(cycle []Object) {
 
 	err := check.newError(InvalidInitCycle)
 	err.addf(obj, "initialization cycle for %s", obj.Name())
-	// subtle loop: print cycle[i] for i = 0, n-1, n-2, ... 1 for len(cycle) = n
-	for i := len(cycle) - 1; i >= 0; i-- {
-		err.addf(obj, "%s refers to", obj.Name())
-		obj = cycle[i]
+	// "cycle[i] refers to cycle[j]" for (i,j) = (0,n-1), (n-1,n-2), ..., (1,0) for len(cycle) = n.
+	for j := len(cycle) - 1; j >= 0; j-- {
+		next := cycle[j]
+		err.addf(obj, "%s refers to %s", obj.Name(), next.Name())
+		obj = next
 	}
-	// print cycle[0] again to close the cycle
-	err.addf(obj, "%s", obj.Name())
 	err.report()
 }
 

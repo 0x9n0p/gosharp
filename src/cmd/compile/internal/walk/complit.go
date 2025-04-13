@@ -85,7 +85,9 @@ const (
 func getdyn(n ir.Node, top bool) initGenType {
 	switch n.Op() {
 	default:
-		if ir.IsConstNode(n) {
+		// Handle constants in linker, except that linker cannot do
+		// the relocations necessary for string constants in FIPS packages.
+		if ir.IsConstNode(n) && (!n.Type().IsString() || !base.Ctxt.IsFIPS()) {
 			return initConst
 		}
 		return initDynamic
@@ -153,7 +155,10 @@ func isStaticCompositeLiteral(n ir.Node) bool {
 	case ir.OLITERAL, ir.ONIL:
 		return true
 	case ir.OCONVIFACE:
-		// See staticassign's OCONVIFACE case for comments.
+		// See staticinit.Schedule.StaticAssign's OCONVIFACE case for comments.
+		if base.Ctxt.IsFIPS() && base.Ctxt.Flag_shared {
+			return false
+		}
 		n := n.(*ir.ConvExpr)
 		val := ir.Node(n)
 		for val.Op() == ir.OCONVIFACE {

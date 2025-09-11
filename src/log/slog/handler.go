@@ -299,7 +299,11 @@ func (h *commonHandler) handle(r Record) error {
 	}
 	// source
 	if h.opts.AddSource {
-		state.appendAttr(Any(SourceKey, r.source()))
+		src := r.Source()
+		if src == nil {
+			src = &Source{}
+		}
+		state.appendAttr(Any(SourceKey, src))
 	}
 	key = MessageKey
 	msg := r.Message
@@ -488,6 +492,9 @@ func (s *handleState) appendAttr(a Attr) bool {
 	// Special case: Source.
 	if v := a.Value; v.Kind() == KindAny {
 		if src, ok := v.Any().(*Source); ok {
+			if src.isEmpty() {
+				return false
+			}
 			if s.h.json {
 				a.Value = src.group()
 			} else {

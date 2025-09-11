@@ -14,7 +14,6 @@ import (
 	"internal/msan"
 	"internal/oserror"
 	"internal/race"
-	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -138,12 +137,32 @@ func FormatMessage(flags uint32, msgsrc uint32, msgid uint32, langid uint32, buf
 	return formatMessage(flags, uintptr(msgsrc), msgid, langid, buf, args)
 }
 
+var errnoErrorCache sync.Map
+
 func (e Errno) Error() string {
 	// deal with special go errors
 	idx := int(e - APPLICATION_ERROR)
 	if 0 <= idx && idx < len(errors) {
 		return errors[idx]
 	}
+
+	cache := false
+	switch e {
+	case ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND:
+		if cached, ok := errnoErrorCache.Load(e); ok {
+			return cached.(string)
+		}
+		cache = true
+	}
+
+	result := e.error()
+	if cache {
+		errnoErrorCache.Store(e, result)
+	}
+	return result
+}
+
+func (e Errno) error() string {
 	// ask windows for the remaining errors
 	var flags uint32 = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_IGNORE_INSERTS
 	b := make([]uint16, 300)
@@ -350,8 +369,9 @@ func Open(name string, flag int, perm uint32) (fd Handle, err error) {
 	if err != nil {
 		return InvalidHandle, err
 	}
+	accessFlags := flag & (O_RDONLY | O_WRONLY | O_RDWR)
 	var access uint32
-	switch flag & (O_RDONLY | O_WRONLY | O_RDWR) {
+	switch accessFlags {
 	case O_RDONLY:
 		access = GENERIC_READ
 	case O_WRONLY:
@@ -377,6 +397,35 @@ func Open(name string, flag int, perm uint32) (fd Handle, err error) {
 	if flag&O_CLOEXEC == 0 {
 		sa = makeInheritSa()
 	}
+	var attrs uint32 = FILE_ATTRIBUTE_NORMAL
+	if perm&S_IWRITE == 0 {
+		attrs = FILE_ATTRIBUTE_READONLY
+	}
+	// fileFlags contains the high 12 bits of flag.
+	// This bit range can be used by the caller to specify the file flags
+	// passed to CreateFile. It is an error to use if the bits can't be
+	// mapped to the supported FILE_FLAG_* constants.
+	if fileFlags := uint32(flag) & fileFlagsMask; fileFlags&^validFileFlagsMask == 0 {
+		attrs |= fileFlags
+	} else {
+		return InvalidHandle, oserror.ErrInvalid
+	}
+
+	switch accessFlags {
+	case O_WRONLY, O_RDWR:
+		// Unix doesn't allow opening a directory with O_WRONLY
+		// or O_RDWR, so we don't set the flag in that case,
+		// which will make CreateFile fail with ERROR_ACCESS_DENIED.
+		// We will map that to EISDIR if the file is a directory.
+	default:
+		// We might be opening a directory for reading,
+		// and CreateFile requires FILE_FLAG_BACKUP_SEMANTICS
+		// to work with directories.
+		attrs |= FILE_FLAG_BACKUP_SEMANTICS
+	}
+	if flag&O_SYNC != 0 {
+		attrs |= _FILE_FLAG_WRITE_THROUGH
+	}
 	// We don't use CREATE_ALWAYS, because when opening a file with
 	// FILE_ATTRIBUTE_READONLY these will replace an existing file
 	// with a new, read-only one. See https://go.dev/issue/38225.
@@ -386,28 +435,15 @@ func Open(name string, flag int, perm uint32) (fd Handle, err error) {
 	switch {
 	case flag&(O_CREAT|O_EXCL) == (O_CREAT | O_EXCL):
 		createmode = CREATE_NEW
+		attrs |= FILE_FLAG_OPEN_REPARSE_POINT // don't follow symlinks
 	case flag&O_CREAT == O_CREAT:
 		createmode = OPEN_ALWAYS
 	default:
 		createmode = OPEN_EXISTING
 	}
-	var attrs uint32 = FILE_ATTRIBUTE_NORMAL
-	if perm&S_IWRITE == 0 {
-		attrs = FILE_ATTRIBUTE_READONLY
-	}
-	if flag&O_WRONLY == 0 && flag&O_RDWR == 0 {
-		// We might be opening or creating a directory.
-		// CreateFile requires FILE_FLAG_BACKUP_SEMANTICS
-		// to work with directories.
-		attrs |= FILE_FLAG_BACKUP_SEMANTICS
-	}
-	if flag&O_SYNC != 0 {
-		const _FILE_FLAG_WRITE_THROUGH = 0x80000000
-		attrs |= _FILE_FLAG_WRITE_THROUGH
-	}
 	h, err := createFile(namep, access, sharemode, sa, createmode, attrs, 0)
 	if h == InvalidHandle {
-		if err == ERROR_ACCESS_DENIED && (flag&O_WRONLY != 0 || flag&O_RDWR != 0) {
+		if err == ERROR_ACCESS_DENIED && (attrs&FILE_FLAG_BACKUP_SEMANTICS == 0) {
 			// We should return EISDIR when we are trying to open a directory with write access.
 			fa, e1 := GetFileAttributes(namep)
 			if e1 == nil && fa&FILE_ATTRIBUTE_DIRECTORY != 0 {
@@ -415,6 +451,18 @@ func Open(name string, flag int, perm uint32) (fd Handle, err error) {
 			}
 		}
 		return h, err
+	}
+	if flag&o_DIRECTORY != 0 {
+		// Check if the file is a directory, else return ENOTDIR.
+		var fi ByHandleFileInformation
+		if err := GetFileInformationByHandle(h, &fi); err != nil {
+			CloseHandle(h)
+			return InvalidHandle, err
+		}
+		if fi.FileAttributes&FILE_ATTRIBUTE_DIRECTORY == 0 {
+			CloseHandle(h)
+			return InvalidHandle, ENOTDIR
+		}
 	}
 	// Ignore O_TRUNC if the file has just been created.
 	if flag&O_TRUNC == O_TRUNC &&
@@ -497,18 +545,8 @@ func setFilePointerEx(handle Handle, distToMove int64, newFilePointer *int64, wh
 	if unsafe.Sizeof(uintptr(0)) == 8 {
 		_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 4, uintptr(handle), uintptr(distToMove), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence), 0, 0)
 	} else {
-		// Different 32-bit systems disgaree about whether distToMove starts 8-byte aligned.
-		switch runtime.GOARCH {
-		default:
-			panic("unsupported 32-bit architecture")
-		case "386":
-			// distToMove is a LARGE_INTEGER, which is 64 bits.
-			_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 5, uintptr(handle), uintptr(distToMove), uintptr(distToMove>>32), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence), 0)
-		case "arm":
-			// distToMove must be 8-byte aligned per ARM calling convention
-			// https://docs.microsoft.com/en-us/cpp/build/overview-of-arm-abi-conventions#stage-c-assignment-of-arguments-to-registers-and-stack
-			_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 6, uintptr(handle), 0, uintptr(distToMove), uintptr(distToMove>>32), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence))
-		}
+		// distToMove is a LARGE_INTEGER, which is 64 bits.
+		_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 5, uintptr(handle), uintptr(distToMove), uintptr(distToMove>>32), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence), 0)
 	}
 	if e1 != 0 {
 		return errnoErr(e1)
@@ -1192,7 +1230,9 @@ func SetsockoptInet4Addr(fd Handle, level, opt int, value [4]byte) (err error) {
 func SetsockoptIPMreq(fd Handle, level, opt int, mreq *IPMreq) (err error) {
 	return Setsockopt(fd, int32(level), int32(opt), (*byte)(unsafe.Pointer(mreq)), int32(unsafe.Sizeof(*mreq)))
 }
-func SetsockoptIPv6Mreq(fd Handle, level, opt int, mreq *IPv6Mreq) (err error) { return EWINDOWS }
+func SetsockoptIPv6Mreq(fd Handle, level, opt int, mreq *IPv6Mreq) (err error) {
+	return Setsockopt(fd, int32(level), int32(opt), (*byte)(unsafe.Pointer(mreq)), int32(unsafe.Sizeof(*mreq)))
+}
 
 func Getpid() (pid int) { return int(getCurrentProcessId()) }
 

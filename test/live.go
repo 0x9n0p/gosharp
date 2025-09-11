@@ -337,23 +337,34 @@ func f20() {
 	ch <- byteptr()
 }
 
-func f21() {
+func f21(x, y string) { // ERROR "live at entry to f21: x y"
 	// key temporary for mapaccess using array literal key.
 	var z *byte
 	if b {
-		z = m2[[2]string{"x", "y"}] // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
+		z = m2[[2]string{x, y}] // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
 	}
 	z = m2[[2]string{"x", "y"}]
 	z = m2[[2]string{"x", "y"}]
 	printbytepointer(z)
 }
 
-func f23() {
+func f21b() {
+	// key temporary for mapaccess using array literal key.
+	var z *byte
+	if b {
+		z = m2[[2]string{"x", "y"}]
+	}
+	z = m2[[2]string{"x", "y"}]
+	z = m2[[2]string{"x", "y"}]
+	printbytepointer(z)
+}
+
+func f23(x, y string) { // ERROR "live at entry to f23: x y"
 	// key temporary for two-result map access using array literal key.
 	var z *byte
 	var ok bool
 	if b {
-		z, ok = m2[[2]string{"x", "y"}] // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
+		z, ok = m2[[2]string{x, y}] // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
 	}
 	z, ok = m2[[2]string{"x", "y"}]
 	z, ok = m2[[2]string{"x", "y"}]
@@ -361,11 +372,34 @@ func f23() {
 	print(ok)
 }
 
-func f24() {
+func f23b() {
+	// key temporary for two-result map access using array literal key.
+	var z *byte
+	var ok bool
+	if b {
+		z, ok = m2[[2]string{"x", "y"}]
+	}
+	z, ok = m2[[2]string{"x", "y"}]
+	z, ok = m2[[2]string{"x", "y"}]
+	printbytepointer(z)
+	print(ok)
+}
+
+func f24(x, y string) { // ERROR "live at entry to f24: x y"
 	// key temporary for map access using array literal key.
 	// value temporary too.
 	if b {
-		m2[[2]string{"x", "y"}] = nil // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
+		m2[[2]string{x, y}] = nil // ERROR "stack object .autotmp_[0-9]+ \[2\]string$"
+	}
+	m2[[2]string{"x", "y"}] = nil
+	m2[[2]string{"x", "y"}] = nil
+}
+
+func f24b() {
+	// key temporary for map access using array literal key.
+	// value temporary too.
+	if b {
+		m2[[2]string{"x", "y"}] = nil
 	}
 	m2[[2]string{"x", "y"}] = nil
 	m2[[2]string{"x", "y"}] = nil
@@ -458,7 +492,7 @@ func f28(b bool) {
 
 func f29(b bool) {
 	if b {
-		for k := range m { // ERROR "live at call to (mapiterinit|mapIterStart): .autotmp_[0-9]+$" "live at call to (mapiternext|mapIterNext): .autotmp_[0-9]+$" "stack object .autotmp_[0-9]+ (runtime.hiter|internal/runtime/maps.Iter)$"
+		for k := range m { // ERROR "live at call to (mapiterinit|mapIterStart): .autotmp_[0-9]+$" "live at call to (mapiternext|mapIterNext): .autotmp_[0-9]+$" "stack object .autotmp_[0-9]+ internal/runtime/maps.Iter$"
 			printstring(k) // ERROR "live at call to printstring: .autotmp_[0-9]+$"
 		}
 	}
@@ -661,7 +695,7 @@ func newT40() *T40 {
 
 func good40() {
 	ret := T40{}              // ERROR "stack object ret T40$"
-	ret.m = make(map[int]int) // ERROR "live at call to rand(32)?: .autotmp_[0-9]+$" "stack object .autotmp_[0-9]+ (runtime.hmap|internal/runtime/maps.Map)$"
+	ret.m = make(map[int]int) // ERROR "live at call to rand(32)?: .autotmp_[0-9]+$" "stack object .autotmp_[0-9]+ internal/runtime/maps.Map$"
 	t := &ret
 	printnl() // ERROR "live at call to printnl: ret$"
 	// Note: ret is live at the printnl because the compiler moves &ret

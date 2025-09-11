@@ -169,9 +169,9 @@ func Compile(f *Func) {
 func (f *Func) DumpFileForPhase(phaseName string) io.WriteCloser {
 	f.dumpFileSeq++
 	fname := fmt.Sprintf("%s_%02d__%s.dump", f.Name, int(f.dumpFileSeq), phaseName)
-	fname = strings.Replace(fname, " ", "_", -1)
-	fname = strings.Replace(fname, "/", "_", -1)
-	fname = strings.Replace(fname, ":", "_", -1)
+	fname = strings.ReplaceAll(fname, " ", "_")
+	fname = strings.ReplaceAll(fname, "/", "_")
+	fname = strings.ReplaceAll(fname, ":", "_")
 
 	if ssaDir := os.Getenv("GOSSADIR"); ssaDir != "" {
 		fname = filepath.Join(ssaDir, fname)
@@ -264,7 +264,7 @@ func PhaseOption(phase, flag string, val int, valString string) string {
 		lastcr := 0
 		phasenames := "    check, all, build, intrinsics, genssa"
 		for _, p := range passes {
-			pn := strings.Replace(p.name, " ", "_", -1)
+			pn := strings.ReplaceAll(p.name, " ", "_")
 			if len(pn)+len(phasenames)-lastcr > 70 {
 				phasenames += "\n    "
 				lastcr = len(phasenames)
@@ -400,7 +400,7 @@ commas. For example:
 		return ""
 	}
 
-	underphase := strings.Replace(phase, "_", " ", -1)
+	underphase := strings.ReplaceAll(phase, "_", " ")
 	var re *regexp.Regexp
 	if phase[0] == '~' {
 		r, ok := regexp.Compile(underphase[1:])
@@ -473,11 +473,11 @@ var passes = [...]pass{
 	{name: "expand calls", fn: expandCalls, required: true},
 	{name: "decompose builtin", fn: postExpandCallsDecompose, required: true},
 	{name: "softfloat", fn: softfloat, required: true},
+	{name: "branchelim", fn: branchelim},
 	{name: "late opt", fn: opt, required: true}, // TODO: split required rules and optimizing rules
 	{name: "dead auto elim", fn: elimDeadAutosGeneric},
 	{name: "sccp", fn: sccp},
 	{name: "generic deadcode", fn: deadcode, required: true}, // remove dead stores, which otherwise mess up store chain
-	{name: "branchelim", fn: branchelim},
 	{name: "late fuse", fn: fuseLate},
 	{name: "check bce", fn: checkbce},
 	{name: "dse", fn: dse},
@@ -583,6 +583,10 @@ var passOrder = [...]constraint{
 	{"late fuse", "memcombine"},
 	// memcombine is a arch-independent pass.
 	{"memcombine", "lower"},
+	// late opt transform some CondSelects into math.
+	{"branchelim", "late opt"},
+	// ranchelim is an arch-independent pass.
+	{"branchelim", "lower"},
 }
 
 func init() {

@@ -6,7 +6,10 @@
 
 package codegen
 
-import "math/bits"
+import (
+	"math/bits"
+	"unsafe"
+)
 
 // ----------------------- //
 //    bits.LeadingZeros    //
@@ -178,8 +181,9 @@ func OnesCount(n uint) int {
 	// amd64:"POPCNTQ"
 	// arm64:"VCNT","VUADDLV"
 	// loong64:"VPCNTV"
-	// s390x:"POPCNT"
 	// ppc64x:"POPCNTD"
+	// riscv64:"CPOP\t"
+	// s390x:"POPCNT"
 	// wasm:"I64Popcnt"
 	return bits.OnesCount(n)
 }
@@ -189,8 +193,9 @@ func OnesCount64(n uint64) int {
 	// amd64:"POPCNTQ"
 	// arm64:"VCNT","VUADDLV"
 	// loong64:"VPCNTV"
-	// s390x:"POPCNT"
 	// ppc64x:"POPCNTD"
+	// riscv64:"CPOP\t"
+	// s390x:"POPCNT"
 	// wasm:"I64Popcnt"
 	return bits.OnesCount64(n)
 }
@@ -200,8 +205,9 @@ func OnesCount32(n uint32) int {
 	// amd64:"POPCNTL"
 	// arm64:"VCNT","VUADDLV"
 	// loong64:"VPCNTW"
-	// s390x:"POPCNT"
 	// ppc64x:"POPCNTW"
+	// riscv64:"CPOPW"
+	// s390x:"POPCNT"
 	// wasm:"I64Popcnt"
 	return bits.OnesCount32(n)
 }
@@ -211,15 +217,17 @@ func OnesCount16(n uint16) int {
 	// amd64:"POPCNTL"
 	// arm64:"VCNT","VUADDLV"
 	// loong64:"VPCNTH"
-	// s390x:"POPCNT"
 	// ppc64x:"POPCNTW"
+	// riscv64:"CPOP\t"
+	// s390x:"POPCNT"
 	// wasm:"I64Popcnt"
 	return bits.OnesCount16(n)
 }
 
 func OnesCount8(n uint8) int {
-	// s390x:"POPCNT"
 	// ppc64x:"POPCNTB"
+	// riscv64/rva22u64,riscv64/rva23u64:"CPOP\t"
+	// s390x:"POPCNT"
 	// wasm:"I64Popcnt"
 	return bits.OnesCount8(n)
 }
@@ -258,42 +266,46 @@ func Reverse8(n uint8) uint8 {
 // ----------------------- //
 
 func ReverseBytes(n uint) uint {
-	// amd64:"BSWAPQ"
 	// 386:"BSWAPL"
-	// s390x:"MOVDBR"
+	// amd64:"BSWAPQ"
 	// arm64:"REV"
 	// loong64:"REVBV"
+	// riscv64/rva22u64,riscv64/rva23u64:"REV8"
+	// s390x:"MOVDBR"
 	return bits.ReverseBytes(n)
 }
 
 func ReverseBytes64(n uint64) uint64 {
-	// amd64:"BSWAPQ"
 	// 386:"BSWAPL"
-	// s390x:"MOVDBR"
+	// amd64:"BSWAPQ"
 	// arm64:"REV"
-	// ppc64x/power10: "BRD"
 	// loong64:"REVBV"
+	// ppc64x/power10: "BRD"
+	// riscv64/rva22u64,riscv64/rva23u64:"REV8"
+	// s390x:"MOVDBR"
 	return bits.ReverseBytes64(n)
 }
 
 func ReverseBytes32(n uint32) uint32 {
-	// amd64:"BSWAPL"
 	// 386:"BSWAPL"
-	// s390x:"MOVWBR"
+	// amd64:"BSWAPL"
 	// arm64:"REVW"
 	// loong64:"REVB2W"
 	// ppc64x/power10: "BRW"
+	// riscv64/rva22u64,riscv64/rva23u64:"REV8","SRLI\t\\$32"
+	// s390x:"MOVWBR"
 	return bits.ReverseBytes32(n)
 }
 
 func ReverseBytes16(n uint16) uint16 {
 	// amd64:"ROLW"
-	// arm64:"REV16W",-"UBFX",-"ORR"
 	// arm/5:"SLL","SRL","ORR"
 	// arm/6:"REV16"
 	// arm/7:"REV16"
+	// arm64:"REV16W",-"UBFX",-"ORR"
 	// loong64:"REVB2H"
 	// ppc64x/power10: "BRH"
+	// riscv64/rva22u64,riscv64/rva23u64:"REV8","SRLI\t\\$48"
 	return bits.ReverseBytes16(n)
 }
 
@@ -926,6 +938,7 @@ func Sub64MPanicOnOverflowGT(a, b [2]uint64) [2]uint64 {
 func Mul(x, y uint) (hi, lo uint) {
 	// amd64:"MULQ"
 	// arm64:"UMULH","MUL"
+	// loong64:"MULV","MULHVU"
 	// ppc64x:"MULHDU","MULLD"
 	// s390x:"MLGR"
 	// mips64: "MULVU"
@@ -936,6 +949,7 @@ func Mul(x, y uint) (hi, lo uint) {
 func Mul64(x, y uint64) (hi, lo uint64) {
 	// amd64:"MULQ"
 	// arm64:"UMULH","MUL"
+	// loong64:"MULV","MULHVU"
 	// ppc64x:"MULHDU","MULLD"
 	// s390x:"MLGR"
 	// mips64: "MULVU"
@@ -945,6 +959,7 @@ func Mul64(x, y uint64) (hi, lo uint64) {
 
 func Mul64HiOnly(x, y uint64) uint64 {
 	// arm64:"UMULH",-"MUL"
+	// loong64:"MULHVU",-"MULV"
 	// riscv64:"MULHU",-"MUL\t"
 	hi, _ := bits.Mul64(x, y)
 	return hi
@@ -952,9 +967,22 @@ func Mul64HiOnly(x, y uint64) uint64 {
 
 func Mul64LoOnly(x, y uint64) uint64 {
 	// arm64:"MUL",-"UMULH"
+	// loong64:"MULV",-"MULHVU"
 	// riscv64:"MUL\t",-"MULHU"
 	_, lo := bits.Mul64(x, y)
 	return lo
+}
+
+func Mul64Const() (uint64, uint64) {
+	// 7133701809754865664 == 99<<56
+	// arm64:"MOVD\t[$]7133701809754865664, R1", "MOVD\t[$]88, R0"
+	// loong64:"MOVV\t[$]88, R4","MOVV\t[$]7133701809754865664, R5",-"MUL"
+	return bits.Mul64(99+88<<8, 1<<56)
+}
+
+func MulUintOverflow(p *uint64) []uint64 {
+	// arm64:"CMP\t[$]72"
+	return unsafe.Slice(p, 9)
 }
 
 // --------------- //

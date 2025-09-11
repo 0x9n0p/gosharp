@@ -230,7 +230,7 @@ func mdestroy(mp *m) {
 
 var sysstat = []byte("/dev/sysstat\x00")
 
-func getproccount() int32 {
+func getCPUCount() int32 {
 	var buf [2048]byte
 	fd := open(&sysstat[0], _OREAD|_OCEXEC, 0)
 	if fd < 0 {
@@ -330,7 +330,7 @@ var (
 func osinit() {
 	physPageSize = getPageSize()
 	initBloc()
-	ncpu = getproccount()
+	numCPUStartup = getCPUCount()
 	getg().m.procid = getpid()
 
 	fd := open(&bintimeDev[0], _OREAD|_OCEXEC, 0)
@@ -358,15 +358,13 @@ func crash() {
 	*(*int)(nil) = 0
 }
 
+// Don't read from /dev/random, since this device can only
+// return a few hundred bits a second and would slow creation
+// of Go processes down significantly.
+//
 //go:nosplit
 func readRandom(r []byte) int {
-	fd := open(&randomDev[0], _OREAD|_OCEXEC, 0)
-	if fd < 0 {
-		fatal("cannot open /dev/random")
-	}
-	n := int(read(fd, unsafe.Pointer(&r[0]), int32(len(r))))
-	closefd(fd)
-	return n
+	return 0
 }
 
 func initsig(preinit bool) {

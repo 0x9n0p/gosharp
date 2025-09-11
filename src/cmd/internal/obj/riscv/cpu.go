@@ -551,7 +551,7 @@ const (
 	AFNMADDQ
 	AFNMSUBQ
 
-	// 22.3 Quad-Precision Convert and Move Instructions
+	// 22.3: Quad-Precision Convert and Move Instructions
 	AFCVTWQ
 	AFCVTLQ
 	AFCVTSQ
@@ -568,13 +568,72 @@ const (
 	AFSGNJNQ
 	AFSGNJXQ
 
-	// 22.4 Quad-Precision Floating-Point Compare Instructions
+	// 22.4: Quad-Precision Floating-Point Compare Instructions
 	AFEQQ
 	AFLEQ
 	AFLTQ
 
-	// 22.5 Quad-Precision Floating-Point Classify Instruction
+	// 22.5: Quad-Precision Floating-Point Classify Instruction
 	AFCLASSQ
+
+	//
+	// "C" Extension for Compressed Instructions
+	//
+
+	// 26.3.1: Compressed Stack-Pointer-Based Loads and Stores
+	ACLWSP
+	ACFLWSP
+	ACLDSP
+	ACFLDSP
+	ACSWSP
+	ACSDSP
+	ACFSWSP
+	ACFSDSP
+
+	// 26.3.2: Compressed Register-Based Loads and Stores
+	ACLW
+	ACLD
+	ACFLW
+	ACFLD
+	ACSW
+	ACSD
+	ACFSW
+	ACFSD
+
+	// 26.4: Compressed Control Transfer Instructions
+	ACJ
+	ACJR
+	ACJALR
+	ACBEQZ
+	ACBNEZ
+
+	// 26.5.1: Compressed Integer Constant-Generation Instructions
+	ACLI
+	ACLUI
+	ACADDI
+	ACADDIW
+	ACADDI16SP
+	ACADDI4SPN
+	ACSLLI
+	ACSRLI
+	ACSRAI
+	ACANDI
+
+	// 26.5.3: Compressed Integer Register-Register Operations
+	ACMV
+	ACADD
+	ACAND
+	ACOR
+	ACXOR
+	ACSUB
+	ACADDW
+	ACSUBW
+
+	// 26.5.5: Compressed NOP Instruction
+	ACNOP
+
+	// 26.5.6: Compressed Breakpoint Instruction
+	ACEBREAK
 
 	//
 	// "B" Extension for Bit Manipulation, Version 1.0.0
@@ -1178,10 +1237,18 @@ const (
 	ARDTIME
 	ASEQZ
 	ASNEZ
+	AVFABSV
+	AVFNEGV
 	AVL1RV
 	AVL2RV
 	AVL4RV
 	AVL8RV
+	AVMCLRM
+	AVMFGEVV
+	AVMFGTVV
+	AVMMVM
+	AVMNOTM
+	AVMSETM
 	AVMSGEUVI
 	AVMSGEUVV
 	AVMSGEVI
@@ -1289,9 +1356,9 @@ var specialOperands = map[SpecialOperand]struct {
 	SPOP_M2:  {encoding: 1, name: "M2"},
 	SPOP_M4:  {encoding: 2, name: "M4"},
 	SPOP_M8:  {encoding: 3, name: "M8"},
-	SPOP_MF2: {encoding: 5, name: "MF2"},
+	SPOP_MF8: {encoding: 5, name: "MF8"},
 	SPOP_MF4: {encoding: 6, name: "MF4"},
-	SPOP_MF8: {encoding: 7, name: "MF8"},
+	SPOP_MF2: {encoding: 7, name: "MF2"},
 
 	SPOP_E8:  {encoding: 0, name: "E8"},
 	SPOP_E16: {encoding: 1, name: "E16"},

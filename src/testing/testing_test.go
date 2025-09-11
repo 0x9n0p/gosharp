@@ -89,6 +89,7 @@ func TestTempDir(t *testing.T) {
 	t.Run("test[]", testTempDir)
 	t.Run("test*", testTempDir)
 	t.Run("äöüéè", testTempDir)
+	t.Run(strings.Repeat("a", 300), testTempDir)
 }
 
 func testTempDir(t *testing.T) {
@@ -143,6 +144,39 @@ func testTempDir(t *testing.T) {
 	glob := filepath.Join(dir, "*.txt")
 	if _, err := filepath.Glob(glob); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestTempDirGOTMPDIR(t *testing.T) {
+	// The first call to t.TempDir will create a parent temporary directory
+	// that will contain all temporary directories created by TempDir.
+	//
+	// Use os.TempDir (not t.TempDir) to get a temporary directory,
+	// set GOTMPDIR to that directory,
+	// and then verify that t.TempDir creates a directory in GOTMPDIR.
+	customTmpDir := filepath.Join(os.TempDir(), "custom-gotmpdir-test")
+	if err := os.MkdirAll(customTmpDir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(customTmpDir)
+
+	t.Setenv("GOTMPDIR", customTmpDir)
+
+	dir := t.TempDir()
+	if dir == "" {
+		t.Fatal("expected dir")
+	}
+
+	if !strings.HasPrefix(dir, customTmpDir) {
+		t.Errorf("TempDir did not use GOTMPDIR: got %q, want prefix %q", dir, customTmpDir)
+	}
+
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("dir %q is not a dir", dir)
 	}
 }
 
@@ -972,6 +1006,53 @@ func TestContext(t *testing.T) {
 			t.Fatal("expected context canceled before cleanup")
 		}
 	})
+}
+
+// TestAttrExample is used by TestAttrSet,
+// and also serves as a convenient test to run that sets an attribute.
+func TestAttrExample(t *testing.T) {
+	t.Attr("key", "value")
+}
+
+func TestAttrSet(t *testing.T) {
+	out := string(runTest(t, "TestAttrExample"))
+
+	want := "=== ATTR  TestAttrExample key value\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("expected output containing %q, got:\n%q", want, out)
+	}
+}
+
+func TestAttrInvalid(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{"k ey", "value"},
+		{"k\tey", "value"},
+		{"k\rey", "value"},
+		{"k\ney", "value"},
+		{"key", "val\rue"},
+		{"key", "val\nue"},
+	}
+
+	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
+		for i, test := range tests {
+			t.Run(fmt.Sprint(i), func(t *testing.T) {
+				t.Attr(test.key, test.value)
+			})
+		}
+		return
+	}
+
+	out := string(runTest(t, "TestAttrInvalid"))
+
+	for i := range tests {
+		want := fmt.Sprintf("--- FAIL: TestAttrInvalid/%v ", i)
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output containing %q, got:\n%q", want, out)
+		}
+	}
 }
 
 func TestBenchmarkBLoopIterationCorrect(t *testing.T) {

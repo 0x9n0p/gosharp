@@ -2227,11 +2227,19 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 					rel := filepath.ToSlash(str.TrimFilePathPrefix(path, pkgdir))
 					name := d.Name()
 					if path != file && (isBadEmbedName(name) || ((name[0] == '.' || name[0] == '_') && !all)) {
-						// Ignore bad names, assuming they won't go into modules.
-						// Also avoid hidden files that user may not know about.
+						// Avoid hidden files that user may not know about.
 						// See golang.org/issue/42328.
 						if d.IsDir() {
 							return fs.SkipDir
+						}
+						// Ignore hidden files.
+						if name[0] == '.' || name[0] == '_' {
+							return nil
+						}
+						// Error on bad embed names.
+						// See golang.org/issue/54003.
+						if isBadEmbedName(name) {
+							return fmt.Errorf("cannot embed file %s: invalid name %s", rel, name)
 						}
 						return nil
 					}
@@ -2488,7 +2496,6 @@ func (p *Package) setBuildInfo(ctx context.Context, autoVCS bool) {
 	var repoDir string
 	var vcsCmd *vcs.Cmd
 	var err error
-	const allowNesting = true
 
 	wantVCS := false
 	switch cfg.BuildBuildvcs {
@@ -2508,7 +2515,7 @@ func (p *Package) setBuildInfo(ctx context.Context, autoVCS bool) {
 			// (so the bootstrap toolchain packages don't even appear to be in GOROOT).
 			goto omitVCS
 		}
-		repoDir, vcsCmd, err = vcs.FromDir(base.Cwd(), "", allowNesting)
+		repoDir, vcsCmd, err = vcs.FromDir(base.Cwd(), "")
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			setVCSError(err)
 			return
@@ -2531,10 +2538,11 @@ func (p *Package) setBuildInfo(ctx context.Context, autoVCS bool) {
 	}
 	if repoDir != "" && vcsCmd.Status != nil {
 		// Check that the current directory, package, and module are in the same
-		// repository. vcs.FromDir allows nested Git repositories, but nesting
-		// is not allowed for other VCS tools. The current directory may be outside
-		// p.Module.Dir when a workspace is used.
-		pkgRepoDir, _, err := vcs.FromDir(p.Dir, "", allowNesting)
+		// repository. vcs.FromDir disallows nested VCS and multiple VCS in the
+		// same repository, unless the GODEBUG allowmultiplevcs is set. The
+		// current directory may be outside p.Module.Dir when a workspace is
+		// used.
+		pkgRepoDir, _, err := vcs.FromDir(p.Dir, "")
 		if err != nil {
 			setVCSError(err)
 			return
@@ -2546,7 +2554,7 @@ func (p *Package) setBuildInfo(ctx context.Context, autoVCS bool) {
 			}
 			goto omitVCS
 		}
-		modRepoDir, _, err := vcs.FromDir(p.Module.Dir, "", allowNesting)
+		modRepoDir, _, err := vcs.FromDir(p.Module.Dir, "")
 		if err != nil {
 			setVCSError(err)
 			return
@@ -2919,8 +2927,7 @@ func PackagesAndErrors(ctx context.Context, opts PackageOpts, patterns []string)
 		}
 		matches, _ = modload.LoadPackages(ctx, modOpts, patterns...)
 	} else {
-		noModRoots := []string{}
-		matches = search.ImportPaths(patterns, noModRoots)
+		matches = search.ImportPaths(patterns)
 	}
 
 	var (
@@ -3381,6 +3388,7 @@ func PackagesAndErrorsOutsideModule(ctx context.Context, opts PackageOpts, args 
 			patterns[i] = p
 		}
 	}
+	patterns = search.CleanPatterns(patterns)
 
 	// Query the module providing the first argument, load its go.mod file, and
 	// check that it doesn't contain directives that would cause it to be

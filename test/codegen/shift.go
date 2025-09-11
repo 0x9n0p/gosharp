@@ -25,19 +25,19 @@ func rshConst64Ux64(v uint64) uint64 {
 }
 
 func rshConst64Ux64Overflow32(v uint32) uint64 {
-	// loong64:"MOVV\t\\$0,",-"SRL\t"
+	// loong64:"MOVV\tR0,",-"SRL\t"
 	// riscv64:"MOV\t\\$0,",-"SRL"
 	return uint64(v) >> 32
 }
 
 func rshConst64Ux64Overflow16(v uint16) uint64 {
-	// loong64:"MOVV\t\\$0,",-"SRLV"
+	// loong64:"MOVV\tR0,",-"SRLV"
 	// riscv64:"MOV\t\\$0,",-"SRL"
 	return uint64(v) >> 16
 }
 
 func rshConst64Ux64Overflow8(v uint8) uint64 {
-	// loong64:"MOVV\t\\$0,",-"SRLV"
+	// loong64:"MOVV\tR0,",-"SRLV"
 	// riscv64:"MOV\t\\$0,",-"SRL"
 	return uint64(v) >> 8
 }
@@ -121,21 +121,25 @@ func rshConst64x32(v int64) int64 {
 
 func lshConst32x1Add(x int32) int32 {
 	// amd64:"SHLL\t[$]2"
+	// loong64:"SLL\t[$]2"
 	return (x + x) << 1
 }
 
 func lshConst64x1Add(x int64) int64 {
 	// amd64:"SHLQ\t[$]2"
+	// loong64:"SLLV\t[$]2"
 	return (x + x) << 1
 }
 
 func lshConst32x2Add(x int32) int32 {
 	// amd64:"SHLL\t[$]3"
+	// loong64:"SLL\t[$]3"
 	return (x + x) << 2
 }
 
 func lshConst64x2Add(x int64) int64 {
 	// amd64:"SHLQ\t[$]3"
+	// loong64:"SLLV\t[$]3"
 	return (x + x) << 2
 }
 
@@ -529,6 +533,16 @@ func checkMergedShifts64(a [256]uint32, b [256]uint64, c [256]byte, v uint64) {
 	b[1] = b[(v>>20)&0xFF]
 	// ppc64x: "RLWNM", -"SLD"
 	b[2] = b[((uint64((uint32(v) >> 21)) & 0x3f) << 4)]
+	// ppc64x: -"RLWNM"
+	b[3] = (b[3] << 24) & 0xFFFFFF000000
+	// ppc64x: "RLWNM\t[$]24, R[0-9]+, [$]0, [$]7,"
+	b[4] = (b[4] << 24) & 0xFF000000
+	// ppc64x: "RLWNM\t[$]24, R[0-9]+, [$]0, [$]7,"
+	b[5] = (b[5] << 24) & 0xFF00000F
+	// ppc64x: -"RLWNM"
+	b[6] = (b[6] << 0) & 0xFF00000F
+	// ppc64x: "RLWNM\t[$]4, R[0-9]+, [$]28, [$]31,"
+	b[7] = (b[7] >> 28) & 0xF
 	// ppc64x: "RLWNM\t[$]11, R[0-9]+, [$]10, [$]15"
 	c[0] = c[((v>>5)&0x3F)<<16]
 	// ppc64x: "ANDCC\t[$]8064,"
@@ -655,4 +669,13 @@ func rsh64to8(v int64) int8 {
 		x >>= 2
 	}
 	return x
+}
+
+// We don't need to worry about shifting
+// more than the type size.
+// (There is still a negative shift test, but
+// no shift-too-big test.)
+func signedModShift(i int) int64 {
+	// arm64:-"CMP",-"CSEL"
+	return 1 << (i % 64)
 }

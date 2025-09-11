@@ -41,6 +41,9 @@ type FuncDebug struct {
 	RegOutputParams []*ir.Name
 	// Variable declarations that were removed during optimization
 	OptDcl []*ir.Name
+	// The ssa.Func.EntryID value, used to build location lists for
+	// return values promoted to heap in later DWARF generation.
+	EntryID ID
 
 	// Filled in by the user. Translates Block and Value ID to PC.
 	//
@@ -74,10 +77,6 @@ func (ls *liveSlot) String() string {
 	return fmt.Sprintf("0x%x.%d.%d", ls.Registers, ls.stackOffsetValue(), int32(ls.StackOffset)&1)
 }
 
-func (ls liveSlot) absent() bool {
-	return ls.Registers == 0 && !ls.onStack()
-}
-
 // StackOffset encodes whether a value is on the stack and if so, where.
 // It is a 31-bit integer followed by a presence flag at the low-order
 // bit.
@@ -102,9 +101,7 @@ type stateAtPC struct {
 // reset fills state with the live variables from live.
 func (state *stateAtPC) reset(live abt.T) {
 	slots, registers := state.slots, state.registers
-	for i := range slots {
-		slots[i] = VarLoc{}
-	}
+	clear(slots)
 	for i := range registers {
 		registers[i] = registers[i][:0]
 	}
@@ -242,12 +239,7 @@ func (state *debugState) initializeCache(f *Func, numVars, numSlots int) {
 	if cap(state.blockDebug) < f.NumBlocks() {
 		state.blockDebug = make([]BlockDebug, f.NumBlocks())
 	} else {
-		// This local variable, and the ones like it below, enable compiler
-		// optimizations. Don't inline them.
-		b := state.blockDebug[:f.NumBlocks()]
-		for i := range b {
-			b[i] = BlockDebug{}
-		}
+		clear(state.blockDebug[:f.NumBlocks()])
 	}
 
 	// A list of slots per Value. Reuse the previous child slices.
@@ -285,10 +277,7 @@ func (state *debugState) initializeCache(f *Func, numVars, numSlots int) {
 	if cap(state.pendingSlotLocs) < numPieces {
 		state.pendingSlotLocs = make([]VarLoc, numPieces)
 	} else {
-		psl := state.pendingSlotLocs[:numPieces]
-		for i := range psl {
-			psl[i] = VarLoc{}
-		}
+		clear(state.pendingSlotLocs[:numPieces])
 	}
 	if cap(state.pendingEntries) < numVars {
 		state.pendingEntries = make([]pendingEntry, numVars)
@@ -307,9 +296,7 @@ func (state *debugState) initializeCache(f *Func, numVars, numSlots int) {
 		state.lists = make([][]byte, numVars)
 	} else {
 		state.lists = state.lists[:numVars]
-		for i := range state.lists {
-			state.lists[i] = nil
-		}
+		clear(state.lists)
 	}
 }
 
@@ -1191,9 +1178,7 @@ func (e *pendingEntry) clear() {
 	e.present = false
 	e.startBlock = 0
 	e.startValue = 0
-	for i := range e.pieces {
-		e.pieces[i] = VarLoc{}
-	}
+	clear(e.pieces)
 }
 
 // canMerge reports whether a new location description is a superset
@@ -1659,13 +1644,13 @@ func readPtr(ctxt *obj.Link, buf []byte) uint64 {
 
 }
 
-// setupLocList creates the initial portion of a location list for a
+// SetupLocList creates the initial portion of a location list for a
 // user variable. It emits the encoded start/end of the range and a
 // placeholder for the size. Return value is the new list plus the
 // slot in the list holding the size (to be updated later).
-func setupLocList(ctxt *obj.Link, f *Func, list []byte, st, en ID) ([]byte, int) {
-	start, startOK := encodeValue(ctxt, f.Entry.ID, st)
-	end, endOK := encodeValue(ctxt, f.Entry.ID, en)
+func SetupLocList(ctxt *obj.Link, entryID ID, list []byte, st, en ID) ([]byte, int) {
+	start, startOK := encodeValue(ctxt, entryID, st)
+	end, endOK := encodeValue(ctxt, entryID, en)
 	if !startOK || !endOK {
 		// This could happen if someone writes a function that uses
 		// >65K values on a 32-bit platform. Hopefully a degraded debugging
@@ -1814,7 +1799,6 @@ func isNamedRegParam(p abi.ABIParamAssignment) bool {
 // appropriate for the ".closureptr" compiler-synthesized variable
 // needed by the debugger for range func bodies.
 func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset func(LocalSlot) int32, rval *FuncDebug) {
-
 	needCloCtx := f.CloSlot != nil
 	pri := f.ABISelf.ABIAnalyzeFuncType(f.Type)
 
@@ -1925,7 +1909,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 		// Param is arriving in one or more registers. We need a 2-element
 		// location expression for it. First entry in location list
 		// will correspond to lifetime in input registers.
-		list, sizeIdx := setupLocList(ctxt, f, rval.LocationLists[pidx],
+		list, sizeIdx := SetupLocList(ctxt, f.Entry.ID, rval.LocationLists[pidx],
 			BlockStart.ID, afterPrologVal)
 		if list == nil {
 			pidx++
@@ -1975,7 +1959,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 
 		// Second entry in the location list will be the stack home
 		// of the param, once it has been spilled.  Emit that now.
-		list, sizeIdx = setupLocList(ctxt, f, list,
+		list, sizeIdx = SetupLocList(ctxt, f.Entry.ID, list,
 			afterPrologVal, FuncEnd.ID)
 		if list == nil {
 			pidx++

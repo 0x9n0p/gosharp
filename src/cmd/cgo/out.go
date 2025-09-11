@@ -251,8 +251,8 @@ func (p *Package) writeDefs() {
 	}
 
 	if callsMalloc && !*gccgo {
-		fmt.Fprint(fgo2, strings.Replace(cMallocDefGo, "PREFIX", cPrefix, -1))
-		fmt.Fprint(fgcc, strings.Replace(strings.Replace(cMallocDefC, "PREFIX", cPrefix, -1), "PACKED", p.packedAttribute(), -1))
+		fmt.Fprint(fgo2, strings.ReplaceAll(cMallocDefGo, "PREFIX", cPrefix))
+		fmt.Fprint(fgcc, strings.ReplaceAll(strings.Replace(cMallocDefC, "PREFIX", cPrefix, -1), "PACKED", p.packedAttribute()))
 	}
 
 	if err := fgcc.Close(); err != nil {
@@ -1812,7 +1812,7 @@ void _cgoPREFIX_Cfunc__Cmalloc(void *v) {
 	void *ret;
 	_cgo_tsan_acquire();
 	ret = malloc(a->p0);
-	if (ret == 0 && a->p0 == 0) {
+	if (ret == NULL && a->p0 == 0) {
 		ret = malloc(1);
 	}
 	a->r1 = ret;
@@ -1954,7 +1954,7 @@ extern const char *_GoStringPtr(_GoString_ s);
 `
 
 func (p *Package) gccExportHeaderProlog() string {
-	return strings.Replace(gccExportHeaderProlog, "GOINTBITS", fmt.Sprint(8*p.IntSize), -1)
+	return strings.ReplaceAll(gccExportHeaderProlog, "GOINTBITS", fmt.Sprint(8*p.IntSize))
 }
 
 // gccExportHeaderProlog is written to the exported header, after the

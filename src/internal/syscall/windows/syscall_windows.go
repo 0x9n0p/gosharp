@@ -32,6 +32,7 @@ func UTF16PtrToString(p *uint16) string {
 }
 
 const (
+	ERROR_INVALID_HANDLE         syscall.Errno = 6
 	ERROR_BAD_LENGTH             syscall.Errno = 24
 	ERROR_SHARING_VIOLATION      syscall.Errno = 32
 	ERROR_LOCK_VIOLATION         syscall.Errno = 33
@@ -39,6 +40,7 @@ const (
 	ERROR_CALL_NOT_IMPLEMENTED   syscall.Errno = 120
 	ERROR_INVALID_NAME           syscall.Errno = 123
 	ERROR_LOCK_FAILED            syscall.Errno = 167
+	ERROR_IO_INCOMPLETE          syscall.Errno = 996
 	ERROR_NO_TOKEN               syscall.Errno = 1008
 	ERROR_NO_UNICODE_TRANSLATION syscall.Errno = 1113
 	ERROR_CANT_ACCESS_FILE       syscall.Errno = 1920
@@ -266,6 +268,7 @@ type WSAMsg struct {
 }
 
 //sys	WSASocket(af int32, typ int32, protocol int32, protinfo *syscall.WSAProtocolInfo, group uint32, flags uint32) (handle syscall.Handle, err error) [failretval==syscall.InvalidHandle] = ws2_32.WSASocketW
+//sys	WSADuplicateSocket(s syscall.Handle, processID uint32, info *syscall.WSAProtocolInfo) (err error) [failretval!=0] = ws2_32.WSADuplicateSocketW
 //sys	WSAGetOverlappedResult(h syscall.Handle, o *syscall.Overlapped, bytes *uint32, wait bool, flags *uint32) (err error) = ws2_32.WSAGetOverlappedResult
 
 func loadWSASendRecvMsg() error {
@@ -545,6 +548,7 @@ func (s NTStatus) Error() string {
 // At the moment, we only need a couple, so just put them here manually.
 // If this list starts getting long, we should consider generating the full set.
 const (
+	STATUS_OBJECT_NAME_COLLISION     NTStatus = 0xC0000035
 	STATUS_FILE_IS_A_DIRECTORY       NTStatus = 0xC00000BA
 	STATUS_DIRECTORY_NOT_EMPTY       NTStatus = 0xC0000101
 	STATUS_NOT_A_DIRECTORY           NTStatus = 0xC0000103

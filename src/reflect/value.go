@@ -55,7 +55,7 @@ type Value struct {
 	//	- flagIndir: val holds a pointer to the data
 	//	- flagAddr: v.CanAddr is true (implies flagIndir and ptr is non-nil)
 	//	- flagMethod: v is a method value.
-	// If ifaceIndir(typ), code can assume that flagIndir is set.
+	// If !typ.IsDirectIface(), code can assume that flagIndir is set.
 	//
 	// The remaining 22+ bits give a method number for method values.
 	// If flag.kind() != Func, code can assume that flagMethod is unset.
@@ -121,11 +121,11 @@ func (v Value) pointer() unsafe.Pointer {
 // packEface converts v to the empty interface.
 func packEface(v Value) any {
 	t := v.typ()
-	var i any
-	e := (*abi.EmptyInterface)(unsafe.Pointer(&i))
+	// Declare e as a struct (and not pointer to struct) to help escape analysis.
+	e := abi.EmptyInterface{}
 	// First, fill in the data portion of the interface.
 	switch {
-	case t.IfaceIndir():
+	case !t.IsDirectIface():
 		if v.flag&flagIndir == 0 {
 			panic("bad indir")
 		}
@@ -145,12 +145,9 @@ func packEface(v Value) any {
 		// Value is direct, and so is the interface.
 		e.Data = v.ptr
 	}
-	// Now, fill in the type portion. We're very careful here not
-	// to have any operation between the e.word and e.typ assignments
-	// that would let the garbage collector observe the partially-built
-	// interface value.
+	// Now, fill in the type portion.
 	e.Type = t
-	return i
+	return *(*any)(unsafe.Pointer(&e))
 }
 
 // unpackEface converts the empty interface i to a Value.
@@ -162,7 +159,7 @@ func unpackEface(i any) Value {
 		return Value{}
 	}
 	f := flag(t.Kind())
-	if t.IfaceIndir() {
+	if !t.IsDirectIface() {
 		f |= flagIndir
 	}
 	return Value{t, e.Data, f}
@@ -627,7 +624,7 @@ func (v Value) call(op string, in []Value) []Value {
 			}
 
 			// Handle pointers passed in registers.
-			if !tv.IfaceIndir() {
+			if tv.IsDirectIface() {
 				// Pointer-valued data gets put directly
 				// into v.ptr.
 				if steps[0].kind != abiStepPointer {
@@ -717,7 +714,7 @@ func callReflect(ctxt *makeFuncImpl, frame unsafe.Pointer, retValid *bool, regs 
 		v := Value{typ, nil, flag(typ.Kind())}
 		steps := abid.call.stepsForValue(i)
 		if st := steps[0]; st.kind == abiStepStack {
-			if typ.IfaceIndir() {
+			if !typ.IsDirectIface() {
 				// value cannot be inlined in interface data.
 				// Must make a copy, because f might keep a reference to it,
 				// and we cannot let f keep a reference to the stack frame
@@ -731,7 +728,7 @@ func callReflect(ctxt *makeFuncImpl, frame unsafe.Pointer, retValid *bool, regs 
 				v.ptr = *(*unsafe.Pointer)(add(ptr, st.stkOff, "1-ptr"))
 			}
 		} else {
-			if typ.IfaceIndir() {
+			if !typ.IsDirectIface() {
 				// All that's left is values passed in registers that we need to
 				// create space for the values.
 				v.flag |= flagIndir
@@ -917,7 +914,7 @@ func storeRcvr(v Value, p unsafe.Pointer) {
 		// the interface data word becomes the receiver word
 		iface := (*nonEmptyInterface)(v.ptr)
 		*(*unsafe.Pointer)(p) = iface.word
-	} else if v.flag&flagIndir != 0 && !t.IfaceIndir() {
+	} else if v.flag&flagIndir != 0 && t.IsDirectIface() {
 		*(*unsafe.Pointer)(p) = *(*unsafe.Pointer)(v.ptr)
 	} else {
 		*(*unsafe.Pointer)(p) = v.ptr
@@ -1219,15 +1216,7 @@ func (v Value) Elem() Value {
 	k := v.kind()
 	switch k {
 	case Interface:
-		var eface any
-		if v.typ().NumMethod() == 0 {
-			eface = *(*any)(v.ptr)
-		} else {
-			eface = (any)(*(*interface {
-				M()
-			})(v.ptr))
-		}
-		x := unpackEface(eface)
+		x := unpackEface(packIfaceValueIntoEmptyIface(v))
 		if x.flag != 0 {
 			x.flag |= v.flag.ro()
 		}
@@ -1235,7 +1224,7 @@ func (v Value) Elem() Value {
 	case Pointer:
 		ptr := v.ptr
 		if v.flag&flagIndir != 0 {
-			if v.typ().IfaceIndir() {
+			if !v.typ().IsDirectIface() {
 				// This is a pointer to a not-in-heap object. ptr points to a uintptr
 				// in the heap. That uintptr is the address of a not-in-heap object.
 				// In general, pointers to not-in-heap objects can be total junk.
@@ -1500,17 +1489,89 @@ func valueInterface(v Value, safe bool) any {
 
 	if v.kind() == Interface {
 		// Special case: return the element inside the interface.
-		// Empty interface has one layout, all interfaces with
-		// methods have a second layout.
-		if v.NumMethod() == 0 {
-			return *(*any)(v.ptr)
-		}
-		return *(*interface {
-			M()
-		})(v.ptr)
+		return packIfaceValueIntoEmptyIface(v)
 	}
 
 	return packEface(v)
+}
+
+// TypeAssert is semantically equivalent to:
+//
+//	v2, ok := v.Interface().(T)
+func TypeAssert[T any](v Value) (T, bool) {
+	if v.flag == 0 {
+		panic(&ValueError{"reflect.TypeAssert", Invalid})
+	}
+	if v.flag&flagRO != 0 {
+		// Do not allow access to unexported values via TypeAssert,
+		// because they might be pointers that should not be
+		// writable or methods or function that should not be callable.
+		panic("reflect.TypeAssert: cannot return value obtained from unexported field or method")
+	}
+
+	if v.flag&flagMethod != 0 {
+		v = makeMethodValue("TypeAssert", v)
+	}
+
+	typ := abi.TypeFor[T]()
+
+	// If v is an interface, return the element inside the interface.
+	//
+	// T is a concrete type and v is an interface. For example:
+	//
+	//	var v any = int(1)
+	//	val := ValueOf(&v).Elem()
+	//	TypeAssert[int](val) == val.Interface().(int)
+	//
+	// T is a interface and v is a non-nil interface value. For example:
+	//
+	//	var v any = &someError{}
+	//	val := ValueOf(&v).Elem()
+	//	TypeAssert[error](val) == val.Interface().(error)
+	//
+	// T is a interface and v is a nil interface value. For example:
+	//
+	//	var v error = nil
+	//	val := ValueOf(&v).Elem()
+	//	TypeAssert[error](val) == val.Interface().(error)
+	if v.kind() == Interface {
+		v, ok := packIfaceValueIntoEmptyIface(v).(T)
+		return v, ok
+	}
+
+	// If T is an interface and v is a concrete type. For example:
+	//
+	//	TypeAssert[any](ValueOf(1)) == ValueOf(1).Interface().(any)
+	//	TypeAssert[error](ValueOf(&someError{})) == ValueOf(&someError{}).Interface().(error)
+	if typ.Kind() == abi.Interface {
+		v, ok := packEface(v).(T)
+		return v, ok
+	}
+
+	// Both v and T must be concrete types.
+	// The only way for an type-assertion to match is if the types are equal.
+	if typ != v.typ() {
+		var zero T
+		return zero, false
+	}
+	if v.flag&flagIndir == 0 {
+		return *(*T)(unsafe.Pointer(&v.ptr)), true
+	}
+	return *(*T)(v.ptr), true
+}
+
+// packIfaceValueIntoEmptyIface converts an interface Value into an empty interface.
+//
+// Precondition: v.kind() == Interface
+func packIfaceValueIntoEmptyIface(v Value) any {
+	// Empty interface has one layout, all interfaces with
+	// methods have a second layout.
+	if v.NumMethod() == 0 {
+		return *(*any)(v.ptr)
+	}
+	return *(*interface {
+		M()
+	})(v.ptr)
 }
 
 // InterfaceData returns a pair of unspecified uintptr values.
@@ -1588,6 +1649,9 @@ func (v Value) IsZero() bool {
 		if v.flag&flagIndir == 0 {
 			return v.ptr == nil
 		}
+		if v.ptr == unsafe.Pointer(&zeroVal[0]) {
+			return true
+		}
 		typ := (*abi.ArrayType)(unsafe.Pointer(v.typ()))
 		// If the type is comparable, then compare directly with zero.
 		if typ.Equal != nil && typ.Size() <= abi.ZeroValSize {
@@ -1615,6 +1679,9 @@ func (v Value) IsZero() bool {
 	case Struct:
 		if v.flag&flagIndir == 0 {
 			return v.ptr == nil
+		}
+		if v.ptr == unsafe.Pointer(&zeroVal[0]) {
+			return true
 		}
 		typ := (*abi.StructType)(unsafe.Pointer(v.typ()))
 		// If the type is comparable, then compare directly with zero.
@@ -1785,7 +1852,7 @@ func (v Value) lenNonSlice() int {
 // copyVal returns a Value containing the map key or value at ptr,
 // allocating a new variable as needed.
 func copyVal(typ *abi.Type, fl flag, ptr unsafe.Pointer) Value {
-	if typ.IfaceIndir() {
+	if !typ.IsDirectIface() {
 		// Copy result so future changes to the map
 		// won't change the underlying value.
 		c := unsafe_New(typ)
@@ -2009,7 +2076,7 @@ func (v Value) recv(nb bool) (val Value, ok bool) {
 	t := tt.Elem
 	val = Value{t, nil, flag(t.Kind())}
 	var p unsafe.Pointer
-	if t.IfaceIndir() {
+	if !t.IsDirectIface() {
 		p = unsafe_New(t)
 		val.ptr = p
 		val.flag |= flagIndir
@@ -2885,7 +2952,7 @@ func Select(cases []SelectCase) (chosen int, recv Value, recvOK bool) {
 		t := tt.Elem
 		p := runcases[chosen].val
 		fl := flag(t.Kind())
-		if t.IfaceIndir() {
+		if !t.IsDirectIface() {
 			recv = Value{t, p, fl | flagIndir}
 		} else {
 			recv = Value{t, *(*unsafe.Pointer)(p), fl}
@@ -2998,7 +3065,7 @@ func Zero(typ Type) Value {
 	}
 	t := &typ.(*rtype).t
 	fl := flag(t.Kind())
-	if t.IfaceIndir() {
+	if !t.IsDirectIface() {
 		var p unsafe.Pointer
 		if t.Size() <= abi.ZeroValSize {
 			p = unsafe.Pointer(&zeroVal[0])
@@ -3021,7 +3088,7 @@ func New(typ Type) Value {
 	}
 	t := &typ.(*rtype).t
 	pt := ptrTo(t)
-	if pt.IfaceIndir() {
+	if !pt.IsDirectIface() {
 		// This is a pointer to a not-in-heap type.
 		panic("reflect: New of type that may not be allocated in heap (possibly undefined cgo C type)")
 	}

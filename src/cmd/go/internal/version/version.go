@@ -8,6 +8,7 @@ package version
 import (
 	"context"
 	"debug/buildinfo"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,7 +24,7 @@ import (
 const Version = "1.0-nightly"
 
 var CmdVersion = &base.Command{
-	UsageLine: "go version [-m] [-v] [file ...]",
+	UsageLine: "go version [-m] [-v] [-json] [file ...]",
 	Short:     "print Go version",
 	Long: `Version prints the build information for Go binary files.
 
@@ -42,6 +43,9 @@ module version information, when available. In the output, the module
 information consists of multiple lines following the version line, each
 indented by a leading tab character.
 
+The -json flag is similar to -m but outputs the runtime/debug.BuildInfo in JSON format.
+If flag -json is specified without -m, go version reports an error.
+
 See also: go doc runtime/debug.BuildInfo.
 `,
 }
@@ -52,8 +56,9 @@ func init() {
 }
 
 var (
-	versionM = CmdVersion.Flag.Bool("m", false, "")
-	versionV = CmdVersion.Flag.Bool("v", false, "")
+	versionM    = CmdVersion.Flag.Bool("m", false, "")
+	versionV    = CmdVersion.Flag.Bool("v", false, "")
+	versionJson = CmdVersion.Flag.Bool("json", false, "")
 )
 
 func runVersion(ctx context.Context, cmd *base.Command, args []string) {
@@ -70,6 +75,11 @@ func runVersion(ctx context.Context, cmd *base.Command, args []string) {
 			argOnlyFlag = "-m"
 		} else if !base.InGOFLAGS("-v") && *versionV {
 			argOnlyFlag = "-v"
+		} else if !base.InGOFLAGS("-json") && *versionJson {
+			// Even though '-json' without '-m' should report an error,
+			// it reports 'no arguments' issue only because that error will be reported
+			// once the 'no arguments' issue is fixed by users.
+			argOnlyFlag = "-json"
 		}
 		if argOnlyFlag != "" {
 			fmt.Fprintf(os.Stderr, "go: 'go version' only accepts %s flag with arguments\n", argOnlyFlag)
@@ -81,6 +91,12 @@ func runVersion(ctx context.Context, cmd *base.Command, args []string) {
 			v = gover.TestVersion + " (TESTGO_VERSION)"
 		}
 		fmt.Printf("gosharp version %s\ngo version %s %s/%s\n", Version, v, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	if !*versionM && *versionJson {
+		fmt.Fprintf(os.Stderr, "go: 'go version' with -json flag requires -m flag\n")
+		base.SetExitStatus(2)
 		return
 	}
 
@@ -157,7 +173,6 @@ func scanFile(file string, info fs.FileInfo, mustPrint bool) bool {
 			if pathErr := (*os.PathError)(nil); errors.As(err, &pathErr) && filepath.Clean(pathErr.Path) == filepath.Clean(file) {
 				fmt.Fprintf(os.Stderr, "%v\n", file)
 			} else {
-
 				// Skip errors for non-Go binaries.
 				// buildinfo.ReadFile errors are not fine-grained enough
 				// to know if the file is a Go binary or not,
@@ -168,6 +183,15 @@ func scanFile(file string, info fs.FileInfo, mustPrint bool) bool {
 			}
 		}
 		return false
+	}
+
+	if *versionM && *versionJson {
+		bs, err := json.MarshalIndent(bi, "", "\t")
+		if err != nil {
+			base.Fatal(err)
+		}
+		fmt.Printf("%s\n", bs)
+		return true
 	}
 
 	fmt.Printf("%s: %s\n", file, bi.GoVersion)

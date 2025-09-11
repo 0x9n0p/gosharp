@@ -169,10 +169,10 @@ func (b *Builder) toolID(name string) string {
 
 		line := stdout.String()
 		f := strings.Fields(line)
-		if len(f) < 3 || f[0] != name && path != VetTool || f[1] != "version" || f[2] == "devel" && !strings.HasPrefix(f[len(f)-1], "buildID=") {
+		if len(f) < 3 || f[0] != name && path != VetTool || f[1] != "version" || strings.Contains(f[2], "devel") && !strings.HasPrefix(f[len(f)-1], "buildID=") {
 			base.Fatalf("go: parsing buildID from %s -V=full: unexpected output:\n\t%s", desc, line)
 		}
-		if f[2] == "devel" {
+		if strings.Contains(f[2], "devel") {
 			// On the development branch, use the content ID part of the build ID.
 			return contentID(f[len(f)-1])
 		}
@@ -401,6 +401,25 @@ var (
 	stdlibRecompiledIncOnce = sync.OnceFunc(stdlibRecompiled.Inc)
 )
 
+// testRunAction returns the run action for a test given the link action
+// for the test binary, if the only (non-test-barrier) action that depend
+// on the link action is the run action.
+func testRunAction(a *Action) *Action {
+	if len(a.triggers) != 1 || a.triggers[0].Mode != "test barrier" {
+		return nil
+	}
+	var runAction *Action
+	for _, t := range a.triggers[0].triggers {
+		if t.Mode == "test run" {
+			if runAction != nil {
+				return nil
+			}
+			runAction = t
+		}
+	}
+	return runAction
+}
+
 // useCache tries to satisfy the action a, which has action ID actionHash,
 // by using a cached result from an earlier build.
 // If useCache decides that the cache can be used, it sets a.buildID
@@ -526,7 +545,7 @@ func (b *Builder) useCache(a *Action, actionHash cache.ActionID, target string, 
 	// then to avoid the link step, report the link as up-to-date.
 	// We avoid the nested build ID problem in the previous special case
 	// by recording the test results in the cache under the action ID half.
-	if len(a.triggers) == 1 && a.triggers[0].TryCache != nil && a.triggers[0].TryCache(b, a.triggers[0]) {
+	if ra := testRunAction(a); ra != nil && ra.TryCache != nil && ra.TryCache(b, ra, a) {
 		// Best effort attempt to display output from the compile and link steps.
 		// If it doesn't work, it doesn't work: reusing the test result is more
 		// important than reprinting diagnostic information.
@@ -642,7 +661,7 @@ func (b *Builder) updateBuildID(a *Action, target string) error {
 	sh := b.Shell(a)
 
 	if cfg.BuildX || cfg.BuildN {
-		sh.ShowCmd("", "%s # internal", joinUnambiguously(str.StringList(base.Tool("buildid"), "-w", target)))
+		sh.ShowCmd("", "%s # internal", joinUnambiguously(str.StringList("go", "tool", "buildid", "-w", target)))
 		if cfg.BuildN {
 			return nil
 		}
@@ -745,8 +764,9 @@ func (b *Builder) updateBuildID(a *Action, target string) error {
 			}
 			outputID, _, err := c.PutExecutable(a.actionID, name+cfg.ExeSuffix, r)
 			r.Close()
+			a.cachedExecutable = c.OutputFile(outputID)
 			if err == nil && cfg.BuildX {
-				sh.ShowCmd("", "%s # internal", joinUnambiguously(str.StringList("cp", target, c.OutputFile(outputID))))
+				sh.ShowCmd("", "%s # internal", joinUnambiguously(str.StringList("cp", target, a.cachedExecutable)))
 			}
 		}
 	}

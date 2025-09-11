@@ -22,14 +22,13 @@ const _UTIME_OMIT = -1
 
 // file is the real representation of *File.
 // The extra level of indirection ensures that no clients of os
-// can overwrite this data, which could cause the cleanup
+// can overwrite this data, which could cause the finalizer
 // to close the wrong file descriptor.
 type file struct {
 	pfd        poll.FD
 	name       string
 	dirinfo    atomic.Pointer[dirInfo] // nil unless directory being read
 	appendMode bool                    // whether file is opened for appending
-	cleanup    runtime.Cleanup         // cleanup closes the file when no longer referenced
 }
 
 // fd is the Windows implementation of Fd.
@@ -37,6 +36,11 @@ func (file *File) fd() uintptr {
 	if file == nil {
 		return uintptr(syscall.InvalidHandle)
 	}
+	// Try to disassociate the file from the runtime poller.
+	// File.Fd doesn't return an error, so we don't have a way to
+	// report it. We just ignore it. It's up to the caller to call
+	// it when there are no concurrent IO operations.
+	_ = file.pfd.DisassociateIOCP()
 	return uintptr(file.pfd.Sysfd)
 }
 
@@ -64,7 +68,7 @@ func newFile(h syscall.Handle, name string, kind string, nonBlocking bool) *File
 		},
 		name: name,
 	}}
-	f.cleanup = runtime.AddCleanup(f, func(f *file) { f.close() }, f.file)
+	runtime.SetFinalizer(f.file, (*file).close)
 
 	// Ignore initialization errors.
 	// Assume any problems will show up in later I/O.
@@ -87,6 +91,18 @@ func newFileFromNewFile(fd uintptr, name string) *File {
 	return newFile(h, name, "file", nonBlocking)
 }
 
+// net_newWindowsFile is a hidden entry point called by net.conn.File.
+// This is used so that the File.pfd.close method calls [syscall.Closesocket]
+// instead of [syscall.CloseHandle].
+//
+//go:linkname net_newWindowsFile net.newWindowsFile
+func net_newWindowsFile(h syscall.Handle, name string) *File {
+	if h == syscall.InvalidHandle {
+		panic("invalid FD")
+	}
+	return newFile(h, name, "file+net", true)
+}
+
 func epipecheck(file *File, e error) {
 }
 
@@ -104,12 +120,12 @@ func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 	if err != nil {
 		return nil, &PathError{Op: "open", Path: name, Err: err}
 	}
-	// syscall.Open always returns a non-blocking handle.
-	return newFile(r, name, "file", false), nil
+	nonblocking := flag&windows.O_FILE_FLAG_OVERLAPPED != 0
+	return newFile(r, name, "file", nonblocking), nil
 }
 
 func openDirNolog(name string) (*File, error) {
-	return openFileNolog(name, O_RDONLY, 0)
+	return openFileNolog(name, O_RDONLY|windows.O_DIRECTORY, 0)
 }
 
 func (file *file) close() error {
@@ -127,9 +143,8 @@ func (file *file) close() error {
 		err = &PathError{Op: "close", Path: file.name, Err: e}
 	}
 
-	// There is no need for a cleanup at this point. File must be alive at the point
-	// where cleanup.stop is called.
-	file.cleanup.Stop()
+	// no need for a finalizer anymore
+	runtime.SetFinalizer(file, nil)
 	return err
 }
 

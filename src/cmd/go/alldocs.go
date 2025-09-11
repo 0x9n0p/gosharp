@@ -121,8 +121,9 @@
 //		The default is GOMAXPROCS, normally the number of CPUs available.
 //	-race
 //		enable data race detection.
-//		Supported only on linux/amd64, freebsd/amd64, darwin/amd64, darwin/arm64, windows/amd64,
-//		linux/ppc64le and linux/arm64 (only for 48-bit VMA).
+//		Supported only on darwin/amd64, darwin/arm64, freebsd/amd64, linux/amd64,
+//		linux/arm64 (only for 48-bit VMA), linux/ppc64le, linux/riscv64 and
+//		windows/amd64.
 //	-msan
 //		enable interoperation with memory sanitizer.
 //		Supported only on linux/amd64, linux/arm64, linux/loong64, freebsd/amd64
@@ -405,6 +406,8 @@
 //
 //	go doc
 //		Show documentation for current package.
+//	go doc -http
+//		Serve HTML documentation over HTTP for the current package.
 //	go doc Foo
 //		Show documentation for Foo in the current package.
 //		(Foo starts with a capital letter so it cannot match
@@ -439,26 +442,28 @@
 //
 // Flags:
 //
-//	-all
-//		Show all the documentation for the package.
-//	-c
-//		Respect case when matching symbols.
-//	-cmd
-//		Treat a command (package main) like a regular package.
-//		Otherwise package main's exported symbols are hidden
-//		when showing the package's top-level documentation.
-//	-short
-//		One-line representation for each symbol.
-//	-src
-//		Show the full source code for the symbol. This will
-//		display the full Go source of its declaration and
-//		definition, such as a function definition (including
-//		the body), type declaration or enclosing const
-//		block. The output may therefore include unexported
-//		details.
-//	-u
-//		Show documentation for unexported as well as exported
-//		symbols, methods, and fields.
+//		-all
+//			Show all the documentation for the package.
+//		-c
+//			Respect case when matching symbols.
+//		-cmd
+//			Treat a command (package main) like a regular package.
+//			Otherwise package main's exported symbols are hidden
+//			when showing the package's top-level documentation.
+//	  	-http
+//			Serve HTML docs over HTTP.
+//		-short
+//			One-line representation for each symbol.
+//		-src
+//			Show the full source code for the symbol. This will
+//			display the full Go source of its declaration and
+//			definition, such as a function definition (including
+//			the body), type declaration or enclosing const
+//			block. The output may therefore include unexported
+//			details.
+//		-u
+//			Show documentation for unexported as well as exported
+//			symbols, methods, and fields.
 //
 // # Print Go environment information
 //
@@ -754,6 +759,8 @@
 // variable, which defaults to $GOPATH/bin or $HOME/go/bin if the GOPATH
 // environment variable is not set. Executables in $GOROOT
 // are installed in $GOROOT/bin or $GOTOOLDIR instead of $GOBIN.
+// Cross compiled binaries are installed in $GOOS_$GOARCH subdirectories
+// of the above.
 //
 // If the arguments have version suffixes (like @latest or @v1.0.0), "go install"
 // builds packages in module-aware mode, ignoring the go.mod file in the current
@@ -1071,8 +1078,8 @@
 //
 // The -retracted flag causes list to report information about retracted
 // module versions. When -retracted is used with -f or -json, the Retracted
-// field will be set to a string explaining why the version was retracted.
-// The string is taken from comments on the retract directive in the
+// field explains why the version was retracted.
+// The strings are taken from comments on the retract directive in the
 // module's go.mod file. When -retracted is used with -versions, retracted
 // versions are listed together with unretracted versions. The -retracted
 // flag may be used with or without -m.
@@ -1259,9 +1266,13 @@
 // The -tool=path and -droptool=path flags add and drop a tool declaration
 // for the given path.
 //
+// The -ignore=path and -dropignore=path flags add and drop a ignore declaration
+// for the given path.
+//
 // The -godebug, -dropgodebug, -require, -droprequire, -exclude, -dropexclude,
-// -replace, -dropreplace, -retract, -dropretract, -tool, and -droptool editing
-// flags may be repeated, and the changes are applied in the order given.
+// -replace, -dropreplace, -retract, -dropretract, -tool, -droptool, -ignore,
+// and -dropignore editing flags may be repeated, and the changes are applied
+// in the order given.
 //
 // The -print flag prints the final go.mod in its text format instead of
 // writing it back to go.mod.
@@ -1313,6 +1324,10 @@
 //	}
 //
 //	type Tool struct {
+//		Path string
+//	}
+//
+//	type Ignore struct {
 //		Path string
 //	}
 //
@@ -1967,7 +1982,7 @@
 //
 // Usage:
 //
-//	go version [-m] [-v] [file ...]
+//	go version [-m] [-v] [-json] [file ...]
 //
 // Version prints the build information for Go binary files.
 //
@@ -1985,6 +2000,9 @@
 // module version information, when available. In the output, the module
 // information consists of multiple lines following the version line, each
 // indented by a leading tab character.
+//
+// The -json flag is similar to -m but outputs the runtime/debug.BuildInfo in JSON format.
+// If flag -json is specified without -m, go version reports an error.
 //
 // See also: go doc runtime/debug.BuildInfo.
 //
@@ -2390,8 +2408,10 @@
 //		The name of checksum database to use and optionally its public key and
 //		URL. See https://golang.org/ref/mod#authenticating.
 //	GOTMPDIR
-//		The directory where the go command will write
-//		temporary source files, packages, and binaries.
+//		Temporary directory used by the go command and testing package.
+//		Overrides the platform-specific temporary directory such as "/tmp".
+//		The go command and testing package will write temporary source files,
+//		packages, and binaries here.
 //	GOTOOLCHAIN
 //		Controls which Go toolchain is used. See https://go.dev/doc/toolchain.
 //	GOVCS
@@ -2512,7 +2532,7 @@
 //		The default is GOFIPS140=off, which makes no FIPS-140 changes at all.
 //		Other values enable FIPS-140 compliance measures and select alternate
 //		versions of the cryptography source code.
-//		See https://go.dev/security/fips140 for details.
+//		See https://go.dev/doc/security/fips140 for details.
 //	GO_EXTLINK_ENABLED
 //		Whether the linker should use external linking mode
 //		when using -linkmode=auto with code that uses cgo.
@@ -3216,8 +3236,8 @@
 //
 // Several of the flags control profiling and write an execution profile
 // suitable for "go tool pprof"; run "go tool pprof -h" for more
-// information. The --alloc_space, --alloc_objects, and --show_bytes
-// options of pprof control how the information is presented.
+// information. The -sample_index=alloc_space, -sample_index=alloc_objects,
+// and -show_bytes options of pprof control how the information is presented.
 //
 // The following flags are recognized by the 'go test' command and
 // control the execution of any test:

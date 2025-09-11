@@ -496,6 +496,15 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			// to the start of the first text section, even if there are multiple.
 			if sect.Name == ".text" {
 				o = ldr.SymValue(rs) - int64(Segtext.Sections[0].Vaddr) + r.Add()
+				if target.IsWasm() {
+					// On Wasm, textoff (e.g. in the method table) is just the function index,
+					// whereas the "PC" (rs's Value) is function index << 16 + block index (see
+					// ../wasm/asm.go:assignAddress).
+					if o&(1<<16-1) != 0 {
+						st.err.Errorf(s, "textoff relocation %s does not target function entry: %s %#x", rt, ldr.SymName(rs), o)
+					}
+					o >>= 16
+				}
 			} else {
 				o = ldr.SymValue(rs) - int64(ldr.SymSect(rs).Vaddr) + r.Add()
 			}
@@ -606,16 +615,16 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			P[off] = byte(int8(o))
 		case 2:
 			if (rt == objabi.R_PCREL || rt == objabi.R_CALL) && o != int64(int16(o)) {
-				st.err.Errorf(s, "pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), o)
+				st.err.Errorf(s, "pc-relative relocation %s address for %s is too big: %#x", rt, ldr.SymName(rs), o)
 			} else if o != int64(int16(o)) && o != int64(uint16(o)) {
-				st.err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), uint64(o))
+				st.err.Errorf(s, "non-pc-relative relocation %s address for %s is too big: %#x", rt, ldr.SymName(rs), uint64(o))
 			}
 			target.Arch.ByteOrder.PutUint16(P[off:], uint16(o))
 		case 4:
 			if (rt == objabi.R_PCREL || rt == objabi.R_CALL) && o != int64(int32(o)) {
-				st.err.Errorf(s, "pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), o)
+				st.err.Errorf(s, "pc-relative relocation %s address for %s is too big: %#x", rt, ldr.SymName(rs), o)
 			} else if o != int64(int32(o)) && o != int64(uint32(o)) {
-				st.err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), uint64(o))
+				st.err.Errorf(s, "non-pc-relative relocation %s address for %s is too big: %#x", rt, ldr.SymName(rs), uint64(o))
 			}
 			target.Arch.ByteOrder.PutUint32(P[off:], uint32(o))
 		case 8:
@@ -894,10 +903,15 @@ func windynrelocsym(ctxt *Link, rel *loader.SymbolBuilder, s loader.Sym) error {
 				rel.AddUint8(0x90)
 				rel.AddUint8(0x90)
 			case sys.AMD64:
+				// The relocation symbol might be at an absolute offset
+				// higher than 32 bits, but the jump instruction can't
+				// encode more than 32 bit offsets. We use a jump
+				// relative to the instruction pointer to get around this
+				// limitation.
 				rel.AddUint8(0xff)
-				rel.AddUint8(0x24)
 				rel.AddUint8(0x25)
-				rel.AddAddrPlus4(ctxt.Arch, targ, 0)
+				rel.AddPCRelPlus(ctxt.Arch, targ, 0)
+				rel.AddUint8(0x90)
 				rel.AddUint8(0x90)
 			}
 		} else if tplt >= 0 {
@@ -1058,7 +1072,8 @@ func writeBlocks(ctxt *Link, out *OutBuf, sem chan int, ldr *loader.Loader, syms
 		}
 
 		// Start the block output operator.
-		if o, err := out.View(uint64(out.Offset() + written)); err == nil {
+		if ctxt.Out.isMmapped() {
+			o := out.View(uint64(out.Offset() + written))
 			sem <- 1
 			wg.Add(1)
 			go func(o *OutBuf, ldr *loader.Loader, syms []loader.Sym, addr, size int64, pad []byte) {
@@ -1137,15 +1152,16 @@ type writeFn func(*Link, *OutBuf, int64, int64)
 
 // writeParallel handles scheduling parallel execution of data write functions.
 func writeParallel(wg *sync.WaitGroup, fn writeFn, ctxt *Link, seek, vaddr, length uint64) {
-	if out, err := ctxt.Out.View(seek); err != nil {
-		ctxt.Out.SeekSet(int64(seek))
-		fn(ctxt, ctxt.Out, int64(vaddr), int64(length))
-	} else {
+	if ctxt.Out.isMmapped() {
+		out := ctxt.Out.View(seek)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			fn(ctxt, out, int64(vaddr), int64(length))
 		}()
+	} else {
+		ctxt.Out.SeekSet(int64(seek))
+		fn(ctxt, ctxt.Out, int64(vaddr), int64(length))
 	}
 }
 

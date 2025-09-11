@@ -169,6 +169,31 @@ Go command will follow symlinks to regular files embedding files.
 The default value `embedfollowsymlinks=0` does not allow following
 symlinks. `embedfollowsymlinks=1` will allow following symlinks.
 
+Go 1.25 added a new `containermaxprocs` setting that controls whether the Go
+runtime will consider cgroup CPU limits when setting the default GOMAXPROCS.
+The default value `containermaxprocs=1` will use cgroup limits in addition to
+the total logical CPU count and CPU affinity. `containermaxprocs=0` will
+disable consideration of cgroup limits. This setting only affects Linux.
+
+Go 1.25 added a new `updatemaxprocs` setting that controls whether the Go
+runtime will periodically update GOMAXPROCS for new CPU affinity or cgroup
+limits. The default value `updatemaxprocs=1` will enable periodic updates.
+`updatemaxprocs=0` will disable periodic updates.
+
+Go 1.25 disabled SHA-1 signature algorithms in TLS 1.2 according to RFC 9155.
+The default can be reverted using the `tlssha1=1` setting.
+
+Go 1.25 switched to SHA-256 to fill in missing SubjectKeyId in
+crypto/x509.CreateCertificate. The setting `x509sha256skid=0` reverts to SHA-1.
+
+Go 1.25 corrected the semantics of contention reports for runtime-internal locks,
+and so removed the [`runtimecontentionstacks` setting](/pkg/runtime#hdr-Environment_Variables).
+
+Go 1.25 (starting with Go 1.25 RC 2) disabled build information stamping when
+multiple VCS are detected due to concerns around VCS injection attacks. This
+behavior and setting was backported to Go 1.24.5 and Go 1.23.11. This behavior
+can be renabled with the setting `allowmultiplevcs=1`.
+
 ### Go 1.24
 
 Go 1.24 added a new `fips140` setting that controls whether the Go
@@ -349,7 +374,7 @@ In particular, a common default Linux kernel configuration can result in
 significant memory overheads, and Go 1.22 no longer works around this default.
 To work around this issue without adjusting kernel settings, transparent huge
 pages can be disabled for Go memory with the
-[`disablethp` setting](/pkg/runtime#hdr-Environment_Variable).
+[`disablethp` setting](/pkg/runtime#hdr-Environment_Variables).
 This behavior was backported to Go 1.21.1, but the setting is only available
 starting with Go 1.21.6.
 This setting may be removed in a future release, and users impacted by this issue
@@ -361,7 +386,7 @@ Go 1.22 added contention on runtime-internal locks to the [`mutex`
 profile](/pkg/runtime/pprof#Profile). Contention on these locks is always
 reported at `runtime._LostContendedRuntimeLock`. Complete stack traces of
 runtime locks can be enabled with the [`runtimecontentionstacks`
-setting](/pkg/runtime#hdr-Environment_Variable). These stack traces have
+setting](/pkg/runtime#hdr-Environment_Variables). These stack traces have
 non-standard semantics, see setting documentation for details.
 
 Go 1.22 added a new [`crypto/x509.Certificate`](/pkg/crypto/x509/#Certificate)
@@ -370,7 +395,7 @@ certificate policy OIDs with components larger than 31 bits. By default this
 field is only used during parsing, when it is populated with policy OIDs, but
 not used during marshaling. It can be used to marshal these larger OIDs, instead
 of the existing PolicyIdentifiers field, by using the
-[`x509usepolicies` setting.](/pkg/crypto/x509/#CreateCertificate).
+[`x509usepolicies` setting](/pkg/crypto/x509/#CreateCertificate).
 
 
 ### Go 1.21

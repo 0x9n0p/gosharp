@@ -23,7 +23,7 @@ func (p OSArch) String() string {
 func RaceDetectorSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
-		return goarch == "amd64" || goarch == "ppc64le" || goarch == "arm64" || goarch == "s390x"
+		return goarch == "amd64" || goarch == "arm64" || goarch == "loong64" || goarch == "ppc64le" || goarch == "riscv64" || goarch == "s390x"
 	case "darwin":
 		return goarch == "amd64" || goarch == "arm64"
 	case "freebsd", "netbsd", "windows":
@@ -72,7 +72,7 @@ func FuzzSupported(goos, goarch string) bool {
 // instrumentation. (FuzzInstrumented implies FuzzSupported.)
 func FuzzInstrumented(goos, goarch string) bool {
 	switch goarch {
-	case "amd64", "arm64":
+	case "amd64", "arm64", "loong64":
 		// TODO(#14565): support more architectures.
 		return FuzzSupported(goos, goarch)
 	default:
@@ -85,7 +85,7 @@ func FuzzInstrumented(goos, goarch string) bool {
 func MustLinkExternal(goos, goarch string, withCgo bool) bool {
 	if withCgo {
 		switch goarch {
-		case "loong64", "mips", "mipsle", "mips64", "mips64le":
+		case "mips", "mipsle", "mips64", "mips64le":
 			// Internally linking cgo is incomplete on some architectures.
 			// https://go.dev/issue/14449
 			return true
@@ -194,7 +194,7 @@ func BuildModeSupported(compiler, buildmode, goos, goarch string) bool {
 			"ios/amd64", "ios/arm64",
 			"aix/ppc64",
 			"openbsd/arm64",
-			"windows/386", "windows/amd64", "windows/arm", "windows/arm64":
+			"windows/386", "windows/amd64", "windows/arm64":
 			return true
 		}
 		return false
@@ -225,8 +225,8 @@ func InternalLinkPIESupported(goos, goarch string) bool {
 	switch goos + "/" + goarch {
 	case "android/arm64",
 		"darwin/amd64", "darwin/arm64",
-		"linux/amd64", "linux/arm64", "linux/ppc64le",
-		"windows/386", "windows/amd64", "windows/arm", "windows/arm64":
+		"linux/amd64", "linux/arm64", "linux/loong64", "linux/ppc64le",
+		"windows/386", "windows/amd64", "windows/arm64":
 		return true
 	}
 	return false

@@ -145,8 +145,8 @@ func goCmd(t *testing.T, op string, args ...string) string {
 
 // escape converts a string to something suitable for a shell command line.
 func escape(s string) string {
-	s = strings.Replace(s, "\\", "\\\\", -1)
-	s = strings.Replace(s, "'", "\\'", -1)
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "'", "\\'")
 	// Conservative guess at characters that will force quoting
 	if s == "" || strings.ContainsAny(s, "\\ ;#*&$~?!|[]()<>{}`") {
 		s = "'" + s + "'"
@@ -421,4 +421,12 @@ func TestIssue67976(t *testing.T) {
 	// The test program uses runtime/pprof in a plugin.
 	globalSkip(t)
 	goCmd(t, "build", "-buildmode=plugin", "-o", "issue67976.so", "./issue67976/plugin.go")
+}
+
+func TestIssue75102(t *testing.T) {
+	globalSkip(t)
+	// add gcflags different from the executable file to trigger plugin open failed.
+	goCmd(t, "build", "-gcflags=all=-N -l", "-buildmode=plugin", "-o", "issue75102.so", "./issue75102/plugin.go")
+	goCmd(t, "build", "-o", "issue75102.exe", "./issue75102/main.go")
+	run(t, "./issue75102.exe")
 }

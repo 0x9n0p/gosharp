@@ -7,12 +7,12 @@ package modload
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"internal/godebugs"
 	"internal/lazyregexp"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -82,6 +82,36 @@ func EnterModule(ctx context.Context, enterModroot string) {
 	LoadModFile(ctx)
 }
 
+// EnterWorkspace enters workspace mode from module mode, applying the updated requirements to the main
+// module to that module in the workspace. There should be no calls to any of the exported
+// functions of the modload package running concurrently with a call to EnterWorkspace as
+// EnterWorkspace will modify the global state they depend on in a non-thread-safe way.
+func EnterWorkspace(ctx context.Context) (exit func(), err error) {
+	// Find the identity of the main module that will be updated before we reset modload state.
+	mm := MainModules.mustGetSingleMainModule()
+	// Get the updated modfile we will use for that module.
+	_, _, updatedmodfile, err := UpdateGoModFromReqs(ctx, WriteOpts{})
+	if err != nil {
+		return nil, err
+	}
+
+	// Reset the state to a clean state.
+	oldstate := setState(state{})
+	ForceUseModules = true
+
+	// Load in workspace mode.
+	InitWorkfile()
+	LoadModFile(ctx)
+
+	// Update the content of the previous main module, and recompute the requirements.
+	*MainModules.ModFile(mm) = *updatedmodfile
+	requirements = requirementsFromModFiles(ctx, MainModules.workFile, slices.Collect(maps.Values(MainModules.modFiles)), nil)
+
+	return func() {
+		setState(oldstate)
+	}, nil
+}
+
 // Variable set in InitWorkfile
 var (
 	// Set to the path to the go.work file, or "" if workspace mode is disabled.
@@ -119,7 +149,7 @@ type MainModuleSet struct {
 	// highest replaced version of each module path; empty string for wildcard-only replacements
 	highestReplaced map[string]string
 
-	indexMu sync.Mutex
+	indexMu sync.RWMutex
 	indices map[module.Version]*modFileIndex
 }
 
@@ -198,8 +228,8 @@ func (mms *MainModuleSet) GetSingleIndexOrNil() *modFileIndex {
 }
 
 func (mms *MainModuleSet) Index(m module.Version) *modFileIndex {
-	mms.indexMu.Lock()
-	defer mms.indexMu.Unlock()
+	mms.indexMu.RLock()
+	defer mms.indexMu.RUnlock()
 	return mms.indices[m]
 }
 
@@ -273,30 +303,6 @@ func (mms *MainModuleSet) Godebugs() []*modfile.Godebug {
 		return f.Godebug
 	}
 	return nil
-}
-
-// Toolchain returns the toolchain set on the single module, in module mode,
-// or the go.work file in workspace mode.
-func (mms *MainModuleSet) Toolchain() string {
-	if inWorkspaceMode() {
-		if mms.workFile != nil && mms.workFile.Toolchain != nil {
-			return mms.workFile.Toolchain.Name
-		}
-		return "go" + mms.GoVersion()
-	}
-	if mms != nil && len(mms.versions) == 1 {
-		f := mms.ModFile(mms.mustGetSingleMainModule())
-		if f == nil {
-			// Special case: we are outside a module, like 'go run x.go'.
-			// Assume the local Go version.
-			// TODO(#49228): Clean this up; see loadModFile.
-			return gover.LocalToolchain()
-		}
-		if f.Toolchain != nil {
-			return f.Toolchain.Name
-		}
-	}
-	return "go" + mms.GoVersion()
 }
 
 func (mms *MainModuleSet) WorkFileReplaceMap() map[module.Version]module.Version {
@@ -395,15 +401,44 @@ func WorkFilePath() string {
 // Reset clears all the initialized, cached state about the use of modules,
 // so that we can start over.
 func Reset() {
-	initialized = false
-	ForceUseModules = false
-	RootMode = 0
-	modRoots = nil
-	cfg.ModulesEnabled = false
-	MainModules = nil
-	requirements = nil
-	workFilePath = ""
-	modfetch.Reset()
+	setState(state{})
+}
+
+func setState(s state) state {
+	oldState := state{
+		initialized:     initialized,
+		forceUseModules: ForceUseModules,
+		rootMode:        RootMode,
+		modRoots:        modRoots,
+		modulesEnabled:  cfg.ModulesEnabled,
+		mainModules:     MainModules,
+		requirements:    requirements,
+	}
+	initialized = s.initialized
+	ForceUseModules = s.forceUseModules
+	RootMode = s.rootMode
+	modRoots = s.modRoots
+	cfg.ModulesEnabled = s.modulesEnabled
+	MainModules = s.mainModules
+	requirements = s.requirements
+	workFilePath = s.workFilePath
+	// The modfetch package's global state is used to compute
+	// the go.sum file, so save and restore it along with the
+	// modload state.
+	oldState.modfetchState = modfetch.SetState(s.modfetchState)
+	return oldState
+}
+
+type state struct {
+	initialized     bool
+	forceUseModules bool
+	rootMode        Root
+	modRoots        []string
+	modulesEnabled  bool
+	mainModules     *MainModuleSet
+	requirements    *Requirements
+	workFilePath    string
+	modfetchState   modfetch.State
 }
 
 // Init determines whether module mode is enabled, locates the root of the
@@ -636,6 +671,9 @@ func ModFilePath() string {
 }
 
 func modFilePath(modRoot string) string {
+	// TODO(matloob): This seems incompatible with workspaces
+	// (unless the user's intention is to replace all workspace modules' modfiles?).
+	// Should we produce an error in workspace mode if cfg.ModFile is set?
 	if cfg.ModFile != "" {
 		return cfg.ModFile
 	}
@@ -689,7 +727,10 @@ func (goModDirtyError) Error() string {
 
 var errGoModDirty error = goModDirtyError{}
 
-func loadWorkFile(path string) (workFile *modfile.WorkFile, modRoots []string, err error) {
+// LoadWorkFile parses and checks the go.work file at the given path,
+// and returns the absolute paths of the workspace modules' modroots.
+// It does not modify the global state of the modload package.
+func LoadWorkFile(path string) (workFile *modfile.WorkFile, modRoots []string, err error) {
 	workDir := filepath.Dir(path)
 	wf, err := ReadWorkFile(path)
 	if err != nil {
@@ -838,7 +879,7 @@ func loadModFile(ctx context.Context, opts *PackageOpts) (*Requirements, error) 
 	var workFile *modfile.WorkFile
 	if inWorkspaceMode() {
 		var err error
-		workFile, modRoots, err = loadWorkFile(workFilePath)
+		workFile, modRoots, err = LoadWorkFile(workFilePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1057,6 +1098,16 @@ func errWorkTooOld(gomod string, wf *modfile.WorkFile, goVers string) error {
 		base.ShortPath(filepath.Dir(gomod)), goVers, verb, gover.FromGoWork(wf))
 }
 
+// CheckReservedModulePath checks whether the module path is a reserved module path
+// that can't be used for a user's module.
+func CheckReservedModulePath(path string) error {
+	if gover.IsToolchain(path) {
+		return errors.New("module path is reserved")
+	}
+
+	return nil
+}
+
 // CreateModFile initializes a new module by creating a go.mod file.
 //
 // If modPath is empty, CreateModFile will attempt to infer the path from the
@@ -1091,6 +1142,8 @@ func CreateModFile(ctx context.Context, modPath string) {
 			}
 		}
 		base.Fatal(err)
+	} else if err := CheckReservedModulePath(modPath); err != nil {
+		base.Fatalf(`go: invalid module path %q: `, modPath)
 	} else if _, _, ok := module.SplitPathVersion(modPath); !ok {
 		if strings.HasPrefix(modPath, "gopkg.in/") {
 			invalidMajorVersionMsg := fmt.Errorf("module paths beginning with gopkg.in/ must always have a major version suffix in the form of .vN:\n\tgo mod init %s", suggestGopkgIn(modPath))
@@ -1679,22 +1732,6 @@ func findModulePath(dir string) (string, error) {
 				}
 			}
 		}
-	}
-
-	// Look for Godeps.json declaring import path.
-	data, _ := os.ReadFile(filepath.Join(dir, "Godeps/Godeps.json"))
-	var cfg1 struct{ ImportPath string }
-	json.Unmarshal(data, &cfg1)
-	if cfg1.ImportPath != "" {
-		return cfg1.ImportPath, nil
-	}
-
-	// Look for vendor.json declaring import path.
-	data, _ = os.ReadFile(filepath.Join(dir, "vendor/vendor.json"))
-	var cfg2 struct{ RootPath string }
-	json.Unmarshal(data, &cfg2)
-	if cfg2.RootPath != "" {
-		return cfg2.RootPath, nil
 	}
 
 	// Look for path in GOPATH.

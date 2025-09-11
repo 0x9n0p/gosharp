@@ -130,7 +130,10 @@ package runtime
 
 import (
 	"internal/cpu"
+	"internal/goarch"
+	"internal/goexperiment"
 	"internal/runtime/atomic"
+	"internal/runtime/gc"
 	"unsafe"
 )
 
@@ -185,12 +188,18 @@ func gcinit() {
 	// Use the environment variable GOMEMLIMIT for the initial memoryLimit value.
 	gcController.init(readGOGC(), readGOMEMLIMIT())
 
+	// Set up the cleanup block ptr mask.
+	for i := range cleanupBlockPtrMask {
+		cleanupBlockPtrMask[i] = 0xff
+	}
+
 	work.startSema = 1
 	work.markDoneSema = 1
 	lockInit(&work.sweepWaiters.lock, lockRankSweepWaiters)
 	lockInit(&work.assistQueue.lock, lockRankAssistQueue)
 	lockInit(&work.strongFromWeak.lock, lockRankStrongFromWeakQueue)
 	lockInit(&work.wbufSpans.lock, lockRankWbufSpans)
+	lockInit(&gcCleanups.lock, lockRankCleanupQueue)
 }
 
 // gcenable is called after the bulk of the runtime initialization,
@@ -328,9 +337,15 @@ type workType struct {
 		// one of the workbuf lists.
 		busy mSpanList
 	}
+	_ cpu.CacheLinePad // prevents false-sharing between wbufSpans and spanq
+
+	// Global queue of spans to scan.
+	//
+	// Only used if goexperiment.GreenTeaGC.
+	spanq spanQueue
 
 	// Restore 64-bit alignment on 32-bit.
-	_ uint32
+	// _ uint32
 
 	// bytesMarked is the number of bytes marked this cycle. This
 	// includes bytes blackened in scanned objects, noscan objects
@@ -356,13 +371,13 @@ type workType struct {
 	tstart int64
 	nwait  uint32
 
-	// Number of roots of various root types. Set by gcMarkRootPrepare.
+	// Number of roots of various root types. Set by gcPrepareMarkRoots.
 	//
 	// nStackRoots == len(stackRoots), but we have nStackRoots for
 	// consistency.
 	nDataRoots, nBSSRoots, nSpanRoots, nStackRoots int
 
-	// Base indexes of each root type. Set by gcMarkRootPrepare.
+	// Base indexes of each root type. Set by gcPrepareMarkRoots.
 	baseData, baseBSS, baseSpans, baseStacks, baseEnd uint32
 
 	// stackRoots is a snapshot of all of the Gs that existed
@@ -638,14 +653,14 @@ func gcStart(trigger gcTrigger) {
 	releasem(mp)
 	mp = nil
 
-	if gp := getg(); gp.syncGroup != nil {
+	if gp := getg(); gp.bubble != nil {
 		// Disassociate the G from its synctest bubble while allocating.
 		// This is less elegant than incrementing the group's active count,
 		// but avoids any contamination between GC and synctest.
-		sg := gp.syncGroup
-		gp.syncGroup = nil
+		bubble := gp.bubble
+		gp.bubble = nil
 		defer func() {
-			gp.syncGroup = sg
+			gp.bubble = bubble
 		}()
 	}
 
@@ -702,6 +717,10 @@ func gcStart(trigger gcTrigger) {
 			println("runtime: p", p.id, "flushGen", fg, "!= sweepgen", mheap_.sweepgen)
 			throw("p mcache not flushed")
 		}
+		// Initialize ptrBuf if necessary.
+		if goexperiment.GreenTeaGC && p.gcw.ptrBuf == nil {
+			p.gcw.ptrBuf = (*[gc.PageSize / goarch.PtrSize]uintptr)(persistentalloc(gc.PageSize, goarch.PtrSize, &memstats.gcMiscSys))
+		}
 	}
 
 	gcBgMarkStartWorkers()
@@ -709,10 +728,10 @@ func gcStart(trigger gcTrigger) {
 	systemstack(gcResetMarkState)
 
 	work.stwprocs, work.maxprocs = gomaxprocs, gomaxprocs
-	if work.stwprocs > ncpu {
-		// This is used to compute CPU time of the STW phases,
-		// so it can't be more than ncpu, even if GOMAXPROCS is.
-		work.stwprocs = ncpu
+	if work.stwprocs > numCPUStartup {
+		// This is used to compute CPU time of the STW phases, so it
+		// can't be more than the CPU count, even if GOMAXPROCS is.
+		work.stwprocs = numCPUStartup
 	}
 	work.heap0 = gcController.heapLive.Load()
 	work.pauseNS = 0
@@ -770,7 +789,7 @@ func gcStart(trigger gcTrigger) {
 	setGCPhase(_GCmark)
 
 	gcBgMarkPrepare() // Must happen before assists are enabled.
-	gcMarkRootPrepare()
+	gcPrepareMarkRoots()
 
 	// Mark all active tinyalloc blocks. Since we're
 	// allocating from these, they need to be black like
@@ -1029,7 +1048,7 @@ func gcMarkTermination(stw worldStop) {
 	// N.B. The execution tracer is not aware of this status
 	// transition and handles it specially based on the
 	// wait reason.
-	casGToWaitingForGC(curgp, _Grunning, waitReasonGarbageCollection)
+	casGToWaitingForSuspendG(curgp, _Grunning, waitReasonGarbageCollection)
 
 	// Run gc on the g0 stack. We do this so that the g stack
 	// we're currently running on will no longer change. Cuts
@@ -1051,26 +1070,10 @@ func gcMarkTermination(stw worldStop) {
 	systemstack(func() {
 		work.heap2 = work.bytesMarked
 		if debug.gccheckmark > 0 {
-			// Run a full non-parallel, stop-the-world
-			// mark using checkmark bits, to check that we
-			// didn't forget to mark anything during the
-			// concurrent mark process.
-			//
-			// Turn off gcwaiting because that will force
-			// gcDrain to return early if this goroutine
-			// happens to have its preemption flag set.
-			// This is fine because the world is stopped.
-			// Restore it after we're done just to be safe.
-			sched.gcwaiting.Store(false)
-			startCheckmarks()
-			gcResetMarkState()
-			gcMarkRootPrepare()
-			gcw := &getg().m.p.ptr().gcw
-			gcDrain(gcw, 0)
-			wbBufFlush1(getg().m.p.ptr())
-			gcw.dispose()
-			endCheckmarks()
-			sched.gcwaiting.Store(true)
+			runCheckmark(func(_ *gcWork) { gcPrepareMarkRoots() })
+		}
+		if debug.checkfinalizers > 0 {
+			checkFinalizersAndCleanups()
 		}
 
 		// marking is complete so we can turn the write barrier off
@@ -1218,6 +1221,9 @@ func gcMarkTermination(stw worldStop) {
 	//
 	// Also, flush the pinner cache, to avoid leaking that memory
 	// indefinitely.
+	if debug.gctrace > 1 {
+		clear(memstats.lastScanStats[:])
+	}
 	forEachP(waitReasonFlushProcCaches, func(pp *p) {
 		pp.mcache.prepareForSweep()
 		if pp.status == _Pidle {
@@ -1226,6 +1232,9 @@ func gcMarkTermination(stw worldStop) {
 				pp.pcache.flush(&mheap_.pages)
 				unlock(&mheap_.lock)
 			})
+		}
+		if debug.gctrace > 1 {
+			pp.gcw.flushScanStats(&memstats.lastScanStats)
 		}
 		pp.pinnerCache = nil
 	})
@@ -1284,7 +1293,24 @@ func gcMarkTermination(stw worldStop) {
 			print(" (forced)")
 		}
 		print("\n")
+
+		if debug.gctrace > 1 {
+			dumpScanStats()
+		}
 		printunlock()
+	}
+
+	// Print finalizer/cleanup queue length. Like gctrace, do this before the next GC starts.
+	// The fact that the next GC might start is not that problematic here, but acts as a convenient
+	// lock on printing this information (so it cannot overlap with itself from the next GC cycle).
+	if debug.checkfinalizers > 0 {
+		fq, fe := finReadQueueStats()
+		fn := max(int64(fq)-int64(fe), 0)
+
+		cq, ce := gcCleanups.readQueueStats()
+		cn := max(int64(cq)-int64(ce), 0)
+
+		println("checkfinalizers: queue:", fn, "finalizers +", cn, "cleanups")
 	}
 
 	// Set any arena chunks that were deferred to fault.
@@ -1392,6 +1418,12 @@ type gcBgMarkWorkerNode struct {
 	// gcBgMarkWorker().
 	m muintptr
 }
+type gcBgMarkWorkerNodePadded struct {
+	gcBgMarkWorkerNode
+	pad [tagAlign - unsafe.Sizeof(gcBgMarkWorkerNode{}) - gcBgMarkWorkerNodeRedZoneSize]byte
+}
+
+const gcBgMarkWorkerNodeRedZoneSize = (16 << 2) * asanenabledBit // redZoneSize(512)
 
 func gcBgMarkWorker(ready chan struct{}) {
 	gp := getg()
@@ -1400,7 +1432,7 @@ func gcBgMarkWorker(ready chan struct{}) {
 	// the stack (see gopark). Prevent deadlock from recursively
 	// starting GC by disabling preemption.
 	gp.m.preemptoff = "GC worker init"
-	node := new(gcBgMarkWorkerNode)
+	node := &new(gcBgMarkWorkerNodePadded).gcBgMarkWorkerNode // TODO: technically not allowed in the heap. See comment in tagptr.go.
 	gp.m.preemptoff = ""
 
 	node.gp.set(gp)
@@ -1489,18 +1521,16 @@ func gcBgMarkWorker(ready chan struct{}) {
 		}
 
 		systemstack(func() {
-			// Mark our goroutine preemptible so its stack
-			// can be scanned. This lets two mark workers
-			// scan each other (otherwise, they would
-			// deadlock). We must not modify anything on
-			// the G stack. However, stack shrinking is
-			// disabled for mark workers, so it is safe to
-			// read from the G stack.
+			// Mark our goroutine preemptible so its stack can be scanned or observed
+			// by the execution tracer. This, for example, lets two mark workers scan
+			// each other (otherwise, they would deadlock).
 			//
-			// N.B. The execution tracer is not aware of this status
-			// transition and handles it specially based on the
-			// wait reason.
-			casGToWaitingForGC(gp, _Grunning, waitReasonGCWorkerActive)
+			// casGToWaitingForSuspendG marks the goroutine as ineligible for a
+			// stack shrink, effectively pinning the stack in memory for the duration.
+			//
+			// N.B. The execution tracer is not aware of this status transition and
+			// handles it specially based on the wait reason.
+			casGToWaitingForSuspendG(gp, _Grunning, waitReasonGCWorkerActive)
 			switch pp.gcMarkWorkerMode {
 			default:
 				throw("gcBgMarkWorker: unexpected gcMarkWorkerMode")
@@ -1512,9 +1542,9 @@ func gcBgMarkWorker(ready chan struct{}) {
 					// everything out of the run
 					// queue so it can run
 					// somewhere else.
-					if drainQ, n := runqdrain(pp); n > 0 {
+					if drainQ := runqdrain(pp); !drainQ.empty() {
 						lock(&sched.lock)
-						globrunqputbatch(&drainQ, int32(n))
+						globrunqputbatch(&drainQ)
 						unlock(&sched.lock)
 					}
 				}
@@ -1576,7 +1606,7 @@ func gcMarkWorkAvailable(p *p) bool {
 	if p != nil && !p.gcw.empty() {
 		return true
 	}
-	if !work.full.empty() {
+	if !work.full.empty() || !work.spanq.empty() {
 		return true // global work available
 	}
 	if work.markrootNext < work.markrootJobs {
@@ -1595,8 +1625,8 @@ func gcMark(startTime int64) {
 	work.tstart = startTime
 
 	// Check that there's no marking work remaining.
-	if work.full != 0 || work.markrootNext < work.markrootJobs {
-		print("runtime: full=", hex(work.full), " next=", work.markrootNext, " jobs=", work.markrootJobs, " nDataRoots=", work.nDataRoots, " nBSSRoots=", work.nBSSRoots, " nSpanRoots=", work.nSpanRoots, " nStackRoots=", work.nStackRoots, "\n")
+	if work.full != 0 || work.markrootNext < work.markrootJobs || !work.spanq.empty() {
+		print("runtime: full=", hex(work.full), " next=", work.markrootNext, " jobs=", work.markrootJobs, " nDataRoots=", work.nDataRoots, " nBSSRoots=", work.nBSSRoots, " nSpanRoots=", work.nSpanRoots, " nStackRoots=", work.nStackRoots, " spanq.n=", work.spanq.size(), "\n")
 		panic("non-empty mark queue after concurrent mark")
 	}
 
@@ -1769,8 +1799,7 @@ func gcResetMarkState() {
 // Hooks for other packages
 
 var poolcleanup func()
-var boringCaches []unsafe.Pointer  // for crypto/internal/boring
-var uniqueMapCleanup chan struct{} // for unique
+var boringCaches []unsafe.Pointer // for crypto/internal/boring
 
 // sync_runtime_registerPoolCleanup should be an internal detail,
 // but widely used packages access it using linkname.
@@ -1791,22 +1820,6 @@ func boring_registerCache(p unsafe.Pointer) {
 	boringCaches = append(boringCaches, p)
 }
 
-//go:linkname unique_runtime_registerUniqueMapCleanup unique.runtime_registerUniqueMapCleanup
-func unique_runtime_registerUniqueMapCleanup(f func()) {
-	// Create the channel on the system stack so it doesn't inherit the current G's
-	// synctest bubble (if any).
-	systemstack(func() {
-		uniqueMapCleanup = make(chan struct{}, 1)
-	})
-	// Start the goroutine in the runtime so it's counted as a system goroutine.
-	go func(cleanup func()) {
-		for {
-			<-uniqueMapCleanup
-			cleanup()
-		}
-	}(f)
-}
-
 func clearpools() {
 	// clear sync.Pools
 	if poolcleanup != nil {
@@ -1816,14 +1829,6 @@ func clearpools() {
 	// clear boringcrypto caches
 	for _, p := range boringCaches {
 		atomicstorep(p, nil)
-	}
-
-	// clear unique maps
-	if uniqueMapCleanup != nil {
-		select {
-		case uniqueMapCleanup <- struct{}{}:
-		default:
-		}
 	}
 
 	// Clear central sudog cache.

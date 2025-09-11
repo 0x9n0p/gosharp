@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -488,7 +489,6 @@ func (e Event) Range() Range {
 		} else {
 			r.Scope.id = int64(e.Proc())
 		}
-		r.Scope.id = int64(e.Proc())
 	case tracev2.EvGCMarkAssistBegin, tracev2.EvGCMarkAssistActive, tracev2.EvGCMarkAssistEnd:
 		r.Name = "GC mark assist"
 		r.Scope = ResourceID{Kind: ResourceGoroutine}
@@ -624,7 +624,6 @@ func (e Event) StateTransition() StateTransition {
 		s = goStateTransition(GoID(e.base.args[0]), GoRunnable, GoRunning)
 	case tracev2.EvGoDestroy:
 		s = goStateTransition(e.ctx.G, GoRunning, GoNotExist)
-		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoDestroySyscall:
 		s = goStateTransition(e.ctx.G, GoSyscall, GoNotExist)
 	case tracev2.EvGoStop:
@@ -645,10 +644,8 @@ func (e Event) StateTransition() StateTransition {
 		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoSyscallEnd:
 		s = goStateTransition(e.ctx.G, GoSyscall, GoRunning)
-		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoSyscallEndBlocked:
 		s = goStateTransition(e.ctx.G, GoSyscall, GoRunnable)
-		s.Stack = e.Stack() // This event references the resource the event happened on.
 	case tracev2.EvGoStatus, tracev2.EvGoStatusStack:
 		packedStatus := e.base.args[2]
 		from, to := packedStatus>>32, packedStatus&((1<<32)-1)
@@ -665,17 +662,22 @@ func (e Event) Sync() Sync {
 	if e.Kind() != EventSync {
 		panic("Sync called on non-Sync event")
 	}
-	var expBatches map[string][]ExperimentalBatch
+	s := Sync{N: int(e.base.args[0])}
 	if e.table != nil {
-		expBatches = make(map[string][]ExperimentalBatch)
+		expBatches := make(map[string][]ExperimentalBatch)
 		for exp, batches := range e.table.expBatches {
 			expBatches[tracev2.Experiments()[exp]] = batches
 		}
+		s.ExperimentalBatches = expBatches
+		if e.table.hasClockSnapshot {
+			s.ClockSnapshot = &ClockSnapshot{
+				Trace: e.table.freq.mul(e.table.snapTime),
+				Wall:  e.table.snapWall,
+				Mono:  e.table.snapMono,
+			}
+		}
 	}
-	return Sync{
-		N:                   int(e.base.args[0]),
-		ExperimentalBatches: expBatches,
-	}
+	return s
 }
 
 // Sync contains details potentially relevant to all the following events, up to but excluding
@@ -684,8 +686,30 @@ type Sync struct {
 	// N indicates that this is the Nth sync event in the trace.
 	N int
 
+	// ClockSnapshot represents a near-simultaneous clock reading of several
+	// different system clocks. The snapshot can be used as a reference to
+	// convert timestamps to different clocks, which is helpful for correlating
+	// timestamps with data captured by other tools. The value is nil for traces
+	// before go1.25.
+	ClockSnapshot *ClockSnapshot
+
 	// ExperimentalBatches contain all the unparsed batches of data for a given experiment.
 	ExperimentalBatches map[string][]ExperimentalBatch
+}
+
+// ClockSnapshot represents a near-simultaneous clock reading of several
+// different system clocks. The snapshot can be used as a reference to convert
+// timestamps to different clocks, which is helpful for correlating timestamps
+// with data captured by other tools.
+type ClockSnapshot struct {
+	// Trace is a snapshot of the trace clock.
+	Trace Time
+
+	// Wall is a snapshot of the system's wall clock.
+	Wall time.Time
+
+	// Mono is a snapshot of the system's monotonic clock.
+	Mono uint64
 }
 
 // Experimental returns a view of the raw event for an experimental event.
@@ -787,6 +811,10 @@ func (e Event) String() string {
 	switch kind := e.Kind(); kind {
 	case EventMetric:
 		m := e.Metric()
+		v := m.Value.String()
+		if m.Value.Kind() == ValueString {
+			v = strconv.Quote(v)
+		}
 		fmt.Fprintf(&sb, " Name=%q Value=%s", m.Name, m.Value)
 	case EventLabel:
 		l := e.Label()
@@ -815,7 +843,6 @@ func (e Event) String() string {
 		fmt.Fprintf(&sb, " Task=%d Category=%q Message=%q", l.Task, l.Category, l.Message)
 	case EventStateTransition:
 		s := e.StateTransition()
-		fmt.Fprintf(&sb, " Resource=%s Reason=%q", s.Resource, s.Reason)
 		switch s.Resource.Kind {
 		case ResourceGoroutine:
 			id := s.Resource.Goroutine()
@@ -826,6 +853,7 @@ func (e Event) String() string {
 			old, new := s.Proc()
 			fmt.Fprintf(&sb, " ProcID=%d %s->%s", id, old, new)
 		}
+		fmt.Fprintf(&sb, " Reason=%q", s.Reason)
 		if s.Stack != NoStack {
 			fmt.Fprintln(&sb)
 			fmt.Fprintln(&sb, "TransitionStack=")
@@ -844,6 +872,16 @@ func (e Event) String() string {
 			fmt.Fprintf(&sb, "%s=%s", arg, r.ArgValue(i).String())
 		}
 		fmt.Fprintf(&sb, "]")
+	case EventSync:
+		s := e.Sync()
+		fmt.Fprintf(&sb, " N=%d", s.N)
+		if s.ClockSnapshot != nil {
+			fmt.Fprintf(&sb, " Trace=%d Mono=%d Wall=%s",
+				s.ClockSnapshot.Trace,
+				s.ClockSnapshot.Mono,
+				s.ClockSnapshot.Wall.Format(time.RFC3339Nano),
+			)
+		}
 	}
 	if stk := e.Stack(); stk != NoStack {
 		fmt.Fprintln(&sb)

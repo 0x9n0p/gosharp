@@ -7,6 +7,7 @@ package fips140
 import (
 	"crypto/internal/fips140deps/godebug"
 	"errors"
+	"hash"
 	"runtime"
 )
 
@@ -45,7 +46,6 @@ func Supported() error {
 	switch {
 	case runtime.GOARCH == "wasm",
 		runtime.GOOS == "windows" && runtime.GOARCH == "386",
-		runtime.GOOS == "windows" && runtime.GOARCH == "arm",
 		runtime.GOOS == "openbsd", // due to -fexecute-only, see #70880
 		runtime.GOOS == "aix":
 		return errors.New("FIPS 140-3 mode is not supported on " + runtime.GOOS + "-" + runtime.GOARCH)
@@ -69,3 +69,9 @@ func Version() string {
 	// moved to a different file.
 	return "latest" //mkzip:version
 }
+
+// Hash is a legacy compatibility alias for hash.Hash.
+//
+// It's only here because [crypto/internal/fips140/ecdsa.TestingOnlyNewDRBG]
+// takes a "func() fips140.Hash" in v1.0.0, instead of being generic.
+type Hash = hash.Hash

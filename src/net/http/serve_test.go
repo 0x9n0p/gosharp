@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -388,6 +389,19 @@ func TestServeMuxHandler(t *testing.T) {
 		if pattern != tt.pattern || rr.Code != tt.code {
 			t.Errorf("%s %s %s = %d, %q, want %d, %q", tt.method, tt.host, tt.path, rr.Code, pattern, tt.code, tt.pattern)
 		}
+	}
+}
+
+// Issue 73688
+func TestServeMuxHandlerTrailingSlash(t *testing.T) {
+	setParallel(t)
+	mux := NewServeMux()
+	const original = "/{x}/"
+	mux.Handle(original, NotFoundHandler())
+	r, _ := NewRequest("POST", "/foo", nil)
+	_, p := mux.Handler(r)
+	if p != original {
+		t.Errorf("got %q, want %q", p, original)
 	}
 }
 
@@ -1643,6 +1657,53 @@ func testTLSServer(t *testing.T, mode testMode) {
 	if res.Header.Get("X-TLS-HandshakeComplete") != "true" {
 		t.Errorf("expected X-TLS-HandshakeComplete header")
 	}
+}
+
+type fakeConnectionStateConn struct {
+	net.Conn
+}
+
+func (fcsc *fakeConnectionStateConn) ConnectionState() tls.ConnectionState {
+	return tls.ConnectionState{
+		ServerName: "example.com",
+	}
+}
+
+func TestTLSServerWithoutTLSConn(t *testing.T) {
+	//set up
+	pr, pw := net.Pipe()
+	c := make(chan int)
+	listener := &oneConnListener{&fakeConnectionStateConn{pr}}
+	server := &Server{
+		Handler: HandlerFunc(func(writer ResponseWriter, request *Request) {
+			if request.TLS == nil {
+				t.Fatal("request.TLS is nil, expected not nil")
+			}
+			if request.TLS.ServerName != "example.com" {
+				t.Fatalf("request.TLS.ServerName is %s, expected %s", request.TLS.ServerName, "example.com")
+			}
+			writer.Header().Set("X-TLS-ServerName", "example.com")
+		}),
+	}
+
+	// write request and read response
+	go func() {
+		req, _ := NewRequest(MethodGet, "https://example.com", nil)
+		req.Write(pw)
+
+		resp, _ := ReadResponse(bufio.NewReader(pw), req)
+		if hdr := resp.Header.Get("X-TLS-ServerName"); hdr != "example.com" {
+			t.Errorf("response header X-TLS-ServerName is %s, expected %s", hdr, "example.com")
+		}
+		close(c)
+		pw.Close()
+	}()
+
+	server.Serve(listener)
+
+	// oneConnListener returns error after one accept, wait util response is read
+	<-c
+	pr.Close()
 }
 
 func TestServeTLS(t *testing.T) {
@@ -5221,8 +5282,8 @@ func benchmarkClientServerParallel(b *testing.B, parallelism int, mode testMode)
 func BenchmarkServer(b *testing.B) {
 	b.ReportAllocs()
 	// Child process mode;
-	if url := os.Getenv("TEST_BENCH_SERVER_URL"); url != "" {
-		n, err := strconv.Atoi(os.Getenv("TEST_BENCH_CLIENT_N"))
+	if url := os.Getenv("GO_TEST_BENCH_SERVER_URL"); url != "" {
+		n, err := strconv.Atoi(os.Getenv("GO_TEST_BENCH_CLIENT_N"))
 		if err != nil {
 			panic(err)
 		}
@@ -5256,8 +5317,8 @@ func BenchmarkServer(b *testing.B) {
 
 	cmd := testenv.Command(b, os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkServer$")
 	cmd.Env = append([]string{
-		fmt.Sprintf("TEST_BENCH_CLIENT_N=%d", b.N),
-		fmt.Sprintf("TEST_BENCH_SERVER_URL=%s", ts.URL),
+		fmt.Sprintf("GO_TEST_BENCH_CLIENT_N=%d", b.N),
+		fmt.Sprintf("GO_TEST_BENCH_SERVER_URL=%s", ts.URL),
 	}, os.Environ()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -5278,68 +5339,12 @@ func getNoBody(urlStr string) (*Response, error) {
 // A benchmark for profiling the client without the HTTP server code.
 // The server code runs in a subprocess.
 func BenchmarkClient(b *testing.B) {
-	b.ReportAllocs()
-	b.StopTimer()
-	defer afterTest(b)
-
 	var data = []byte("Hello world.\n")
-	if server := os.Getenv("TEST_BENCH_SERVER"); server != "" {
-		// Server process mode.
-		port := os.Getenv("TEST_BENCH_SERVER_PORT") // can be set by user
-		if port == "" {
-			port = "0"
-		}
-		ln, err := net.Listen("tcp", "localhost:"+port)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
-			os.Exit(1)
-		}
-		fmt.Println(ln.Addr().String())
-		HandleFunc("/", func(w ResponseWriter, r *Request) {
-			r.ParseForm()
-			if r.Form.Get("stop") != "" {
-				os.Exit(0)
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(data)
-		})
-		var srv Server
-		log.Fatal(srv.Serve(ln))
-	}
 
-	// Start server process.
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := testenv.CommandContext(b, ctx, os.Args[0], "-test.run=^$", "-test.bench=^BenchmarkClient$")
-	cmd.Env = append(cmd.Environ(), "TEST_BENCH_SERVER=yes")
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		b.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		b.Fatalf("subprocess failed to start: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
-
-	// Wait for the server in the child process to respond and tell us
-	// its listening address, once it's started listening:
-	bs := bufio.NewScanner(stdout)
-	if !bs.Scan() {
-		b.Fatalf("failed to read listening URL from child: %v", bs.Err())
-	}
-	url := "http://" + strings.TrimSpace(bs.Text()) + "/"
-	if _, err := getNoBody(url); err != nil {
-		b.Fatalf("initial probe of child process failed: %v", err)
-	}
+	url := startClientBenchmarkServer(b, HandlerFunc(func(w ResponseWriter, _ *Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
+	}))
 
 	// Do b.N requests to the server.
 	b.StartTimer()
@@ -5358,12 +5363,115 @@ func BenchmarkClient(b *testing.B) {
 		}
 	}
 	b.StopTimer()
+}
+
+func startClientBenchmarkServer(b *testing.B, handler Handler) string {
+	b.ReportAllocs()
+	b.StopTimer()
+
+	if server := os.Getenv("GO_TEST_BENCH_SERVER"); server != "" {
+		// Server process mode.
+		port := os.Getenv("GO_TEST_BENCH_SERVER_PORT") // can be set by user
+		if port == "" {
+			port = "0"
+		}
+		ln, err := net.Listen("tcp", "localhost:"+port)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(ln.Addr().String())
+
+		HandleFunc("/", func(w ResponseWriter, r *Request) {
+			r.ParseForm()
+			if r.Form.Get("stop") != "" {
+				os.Exit(0)
+			}
+			handler.ServeHTTP(w, r)
+		})
+		var srv Server
+		log.Fatal(srv.Serve(ln))
+	}
+
+	// Start server process.
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := testenv.CommandContext(b, ctx, os.Args[0], "-test.run=^$", "-test.bench=^"+b.Name()+"$")
+	cmd.Env = append(cmd.Environ(), "GO_TEST_BENCH_SERVER=yes")
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		b.Fatalf("subprocess failed to start: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+
+	// Wait for the server in the child process to respond and tell us
+	// its listening address, once it's started listening:
+	bs := bufio.NewScanner(stdout)
+	if !bs.Scan() {
+		b.Fatalf("failed to read listening URL from child: %v", bs.Err())
+	}
+	url := "http://" + strings.TrimSpace(bs.Text()) + "/"
+	if _, err := getNoBody(url); err != nil {
+		b.Fatalf("initial probe of child process failed: %v", err)
+	}
 
 	// Instruct server process to stop.
-	getNoBody(url + "?stop=yes")
-	if err := <-done; err != nil {
-		b.Fatalf("subprocess failed: %v", err)
+	b.Cleanup(func() {
+		getNoBody(url + "?stop=yes")
+		if err := <-done; err != nil {
+			b.Fatalf("subprocess failed: %v", err)
+		}
+
+		cancel()
+		<-done
+
+		afterTest(b)
+	})
+
+	return url
+}
+
+func BenchmarkClientGzip(b *testing.B) {
+	const responseSize = 1024 * 1024
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := io.CopyN(gz, crand.Reader, responseSize); err != nil {
+		b.Fatal(err)
 	}
+	gz.Close()
+
+	data := buf.Bytes()
+
+	url := startClientBenchmarkServer(b, HandlerFunc(func(w ResponseWriter, _ *Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(data)
+	}))
+
+	// Do b.N requests to the server.
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := Get(url)
+		if err != nil {
+			b.Fatalf("Get: %v", err)
+		}
+		n, err := io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		if err != nil {
+			b.Fatalf("ReadAll: %v", err)
+		}
+		if n != responseSize {
+			b.Fatalf("ReadAll: expected %d bytes, got %d", responseSize, n)
+		}
+	}
+	b.StopTimer()
 }
 
 func BenchmarkServerFakeConnNoKeepAlive(b *testing.B) {
@@ -5795,7 +5903,7 @@ func testServerShutdown(t *testing.T, mode testMode) {
 }
 
 func TestServerShutdownStateNew(t *testing.T) { runSynctest(t, testServerShutdownStateNew) }
-func testServerShutdownStateNew(t testing.TB, mode testMode) {
+func testServerShutdownStateNew(t *testing.T, mode testMode) {
 	if testing.Short() {
 		t.Skip("test takes 5-6 seconds; skipping in short mode")
 	}

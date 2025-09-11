@@ -87,6 +87,10 @@ type regInfo struct {
 	// clobbers encodes the set of registers that are overwritten by
 	// the instruction (other than the output registers).
 	clobbers regMask
+	// Instruction clobbers the register containing input 0.
+	clobbersArg0 bool
+	// Instruction clobbers the register containing input 1.
+	clobbersArg1 bool
 	// outputs[i] encodes the set of registers allowed for the i'th output.
 	outputs []regMask
 }
@@ -113,6 +117,7 @@ var archs []arch
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
 var memprofile = flag.String("memprofile", "", "write memory profile to `file`")
 var tracefile = flag.String("trace", "", "write trace to `file`")
+var outDir = flag.String("outdir", "..", "directory in which to write generated files")
 
 func main() {
 	flag.Parse()
@@ -142,6 +147,13 @@ func main() {
 			log.Fatalf("failed to start trace: %v", err)
 		}
 		defer trace.Stop()
+	}
+
+	if *outDir != ".." {
+		err := os.MkdirAll(*outDir, 0755)
+		if err != nil {
+			log.Fatalf("failed to create output directory: %v", err)
+		}
 	}
 
 	slices.SortFunc(archs, func(a, b arch) int {
@@ -191,6 +203,10 @@ func main() {
 			log.Fatal("could not write memory profile: ", err)
 		}
 	}
+}
+
+func outFile(file string) string {
+	return *outDir + "/" + file
 }
 
 func genOp() {
@@ -281,7 +297,7 @@ func genOp() {
 			fmt.Fprintf(w, "argLen: %d,\n", v.argLength)
 
 			if v.rematerializeable {
-				if v.reg.clobbers != 0 {
+				if v.reg.clobbers != 0 || v.reg.clobbersArg0 || v.reg.clobbersArg1 {
 					log.Fatalf("%s is rematerializeable and clobbers registers", v.name)
 				}
 				if v.clobberFlags {
@@ -350,7 +366,7 @@ func genOp() {
 				if !needEffect {
 					log.Fatalf("symEffect with aux %s not allowed", v.aux)
 				}
-				fmt.Fprintf(w, "symEffect: Sym%s,\n", strings.Replace(v.symEffect, ",", "|Sym", -1))
+				fmt.Fprintf(w, "symEffect: Sym%s,\n", strings.ReplaceAll(v.symEffect, ",", "|Sym"))
 			} else if needEffect {
 				log.Fatalf("symEffect needed for aux %s", v.aux)
 			}
@@ -389,6 +405,12 @@ func genOp() {
 
 			if v.reg.clobbers > 0 {
 				fmt.Fprintf(w, "clobbers: %d,%s\n", v.reg.clobbers, a.regMaskComment(v.reg.clobbers))
+			}
+			if v.reg.clobbersArg0 {
+				fmt.Fprintf(w, "clobbersArg0: true,\n")
+			}
+			if v.reg.clobbersArg1 {
+				fmt.Fprintf(w, "clobbersArg1: true,\n")
 			}
 
 			// reg outputs
@@ -500,7 +522,7 @@ func genOp() {
 		panic(err)
 	}
 
-	if err := os.WriteFile("../opGen.go", b, 0666); err != nil {
+	if err := os.WriteFile(outFile("opGen.go"), b, 0666); err != nil {
 		log.Fatalf("can't write output: %v\n", err)
 	}
 

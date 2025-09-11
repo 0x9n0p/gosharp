@@ -13,8 +13,6 @@
 //
 // See https://http2.github.io/ for more information on HTTP/2.
 //
-// See https://http2.golang.org/ for a test server running this code.
-//
 // Copyright 2024 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -1608,7 +1606,7 @@ const (
 	http2FrameContinuation http2FrameType = 0x9
 )
 
-var http2frameName = map[http2FrameType]string{
+var http2frameNames = [...]string{
 	http2FrameData:         "DATA",
 	http2FrameHeaders:      "HEADERS",
 	http2FramePriority:     "PRIORITY",
@@ -1622,10 +1620,10 @@ var http2frameName = map[http2FrameType]string{
 }
 
 func (t http2FrameType) String() string {
-	if s, ok := http2frameName[t]; ok {
-		return s
+	if int(t) < len(http2frameNames) {
+		return http2frameNames[t]
 	}
-	return fmt.Sprintf("UNKNOWN_FRAME_TYPE_%d", uint8(t))
+	return fmt.Sprintf("UNKNOWN_FRAME_TYPE_%d", t)
 }
 
 // Flags is a bitmask of HTTP/2 flags.
@@ -1693,7 +1691,7 @@ var http2flagName = map[http2FrameType]map[http2Flags]string{
 // might be 0).
 type http2frameParser func(fc *http2frameCache, fh http2FrameHeader, countError func(string), payload []byte) (http2Frame, error)
 
-var http2frameParsers = map[http2FrameType]http2frameParser{
+var http2frameParsers = [...]http2frameParser{
 	http2FrameData:         http2parseDataFrame,
 	http2FrameHeaders:      http2parseHeadersFrame,
 	http2FramePriority:     http2parsePriorityFrame,
@@ -1707,8 +1705,8 @@ var http2frameParsers = map[http2FrameType]http2frameParser{
 }
 
 func http2typeFrameParser(t http2FrameType) http2frameParser {
-	if f := http2frameParsers[t]; f != nil {
-		return f
+	if int(t) < len(http2frameParsers) {
+		return http2frameParsers[t]
 	}
 	return http2parseUnknownFrame
 }
@@ -1792,6 +1790,11 @@ var http2fhBytes = sync.Pool{
 		buf := make([]byte, http2frameHeaderLen)
 		return &buf
 	},
+}
+
+func http2invalidHTTP1LookingFrameHeader() http2FrameHeader {
+	fh, _ := http2readFrameHeader(make([]byte, http2frameHeaderLen), strings.NewReader("HTTP/1.1 "))
+	return fh
 }
 
 // ReadFrameHeader reads 9 bytes from r and returns a FrameHeader.
@@ -2075,10 +2078,16 @@ func (fr *http2Framer) ReadFrame() (http2Frame, error) {
 		return nil, err
 	}
 	if fh.Length > fr.maxReadSize {
+		if fh == http2invalidHTTP1LookingFrameHeader() {
+			return nil, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", http2ErrFrameTooLarge)
+		}
 		return nil, http2ErrFrameTooLarge
 	}
 	payload := fr.getReadBuf(fh.Length)
 	if _, err := io.ReadFull(fr.r, payload); err != nil {
+		if fh == http2invalidHTTP1LookingFrameHeader() {
+			return nil, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", err)
+		}
 		return nil, err
 	}
 	f, err := http2typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
@@ -5007,7 +5016,10 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 
 func (sc *http2serverConn) handlePingTimer(lastFrameReadTime time.Time) {
 	if sc.pingSent {
-		sc.vlogf("timeout waiting for PING response")
+		sc.logf("timeout waiting for PING response")
+		if f := sc.countErrorFunc; f != nil {
+			f("conn_close_lost_ping")
+		}
 		sc.conn.Close()
 		return
 	}

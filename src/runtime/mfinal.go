@@ -10,13 +10,14 @@ import (
 	"internal/abi"
 	"internal/goarch"
 	"internal/runtime/atomic"
+	"internal/runtime/gc"
 	"internal/runtime/sys"
 	"unsafe"
 )
 
 const finBlockSize = 4 * 1024
 
-// finBlock is an block of finalizers/cleanups to be executed. finBlocks
+// finBlock is an block of finalizers to be executed. finBlocks
 // are arranged in a linked list for the finalizer queue.
 //
 // finBlock is allocated from non-GC'd memory, so any heap pointers
@@ -43,11 +44,13 @@ const (
 )
 
 var (
-	finlock    mutex     // protects the following variables
-	fing       *g        // goroutine that runs finalizers
-	finq       *finBlock // list of finalizers that are to be executed
-	finc       *finBlock // cache of free blocks
-	finptrmask [finBlockSize / goarch.PtrSize / 8]byte
+	finlock     mutex     // protects the following variables
+	fing        *g        // goroutine that runs finalizers
+	finq        *finBlock // list of finalizers that are to be executed
+	finc        *finBlock // cache of free blocks
+	finptrmask  [finBlockSize / goarch.PtrSize / 8]byte
+	finqueued   uint64 // monotonic count of queued finalizers
+	finexecuted uint64 // monotonic count of executed finalizers
 )
 
 var allfin *finBlock // list of all blocks
@@ -107,6 +110,7 @@ func queuefinalizer(p unsafe.Pointer, fn *funcval, nret uintptr, fint *_type, ot
 	}
 
 	lock(&finlock)
+
 	if finq == nil || finq.cnt == uint32(len(finq.fin)) {
 		if finc == nil {
 			finc = (*finBlock)(persistentalloc(finBlockSize, 0, &memstats.gcMiscSys))
@@ -140,6 +144,7 @@ func queuefinalizer(p unsafe.Pointer, fn *funcval, nret uintptr, fint *_type, ot
 	f.fint = fint
 	f.ot = ot
 	f.arg = p
+	finqueued++
 	unlock(&finlock)
 	fingStatus.Or(fingWake)
 }
@@ -164,7 +169,7 @@ func wakefing() *g {
 func createfing() {
 	// start the finalizer goroutine exactly once
 	if fingStatus.Load() == fingUninitialized && fingStatus.CompareAndSwap(fingUninitialized, fingCreated) {
-		go runFinalizersAndCleanups()
+		go runFinalizers()
 	}
 }
 
@@ -176,8 +181,16 @@ func finalizercommit(gp *g, lock unsafe.Pointer) bool {
 	return true
 }
 
-// This is the goroutine that runs all of the finalizers and cleanups.
-func runFinalizersAndCleanups() {
+func finReadQueueStats() (queued, executed uint64) {
+	lock(&finlock)
+	queued = finqueued
+	executed = finexecuted
+	unlock(&finlock)
+	return
+}
+
+// This is the goroutine that runs all of the finalizers.
+func runFinalizers() {
 	var (
 		frame    unsafe.Pointer
 		framecap uintptr
@@ -203,24 +216,9 @@ func runFinalizersAndCleanups() {
 			racefingo()
 		}
 		for fb != nil {
-			for i := fb.cnt; i > 0; i-- {
+			n := fb.cnt
+			for i := n; i > 0; i-- {
 				f := &fb.fin[i-1]
-
-				// arg will only be nil when a cleanup has been queued.
-				if f.arg == nil {
-					var cleanup func()
-					fn := unsafe.Pointer(f.fn)
-					cleanup = *(*func())(unsafe.Pointer(&fn))
-					fingStatus.Or(fingRunningFinalizer)
-					cleanup()
-					fingStatus.And(^fingRunningFinalizer)
-
-					f.fn = nil
-					f.arg = nil
-					f.ot = nil
-					atomic.Store(&fb.cnt, i-1)
-					continue
-				}
 
 				var regs abi.RegArgs
 				// The args may be passed in registers or on stack. Even for
@@ -240,8 +238,6 @@ func runFinalizersAndCleanups() {
 					frame = mallocgc(framesz, nil, true)
 					framecap = framesz
 				}
-				// cleanups also have a nil fint. Cleanups should have been processed before
-				// reaching this point.
 				if f.fint == nil {
 					throw("missing type in finalizer")
 				}
@@ -255,7 +251,7 @@ func runFinalizersAndCleanups() {
 					// confusing the write barrier.
 					*(*[2]uintptr)(frame) = [2]uintptr{}
 				}
-				switch f.fint.Kind_ & abi.KindMask {
+				switch f.fint.Kind() {
 				case abi.Pointer:
 					// direct use of pointer
 					*(*unsafe.Pointer)(r) = f.arg
@@ -287,6 +283,7 @@ func runFinalizersAndCleanups() {
 			}
 			next := fb.next
 			lock(&finlock)
+			finexecuted += uint64(n)
 			fb.next = finc
 			finc = fb
 			unlock(&finlock)
@@ -323,7 +320,7 @@ func isGoPointerWithoutSpan(p unsafe.Pointer) bool {
 // blockUntilEmptyFinalizerQueue blocks until either the finalizer
 // queue is emptied (and the finalizers have executed) or the timeout
 // is reached. Returns true if the finalizer queue was emptied.
-// This is used by the runtime and sync tests.
+// This is used by the runtime, sync, and unique tests.
 func blockUntilEmptyFinalizerQueue(timeout int64) bool {
 	start := nanotime()
 	for nanotime()-start < timeout {
@@ -438,7 +435,7 @@ func SetFinalizer(obj any, finalizer any) {
 	if etyp == nil {
 		throw("runtime.SetFinalizer: first argument is nil")
 	}
-	if etyp.Kind_&abi.KindMask != abi.Pointer {
+	if etyp.Kind() != abi.Pointer {
 		throw("runtime.SetFinalizer: first argument is " + toRType(etyp).string() + ", not pointer")
 	}
 	ot := (*ptrtype)(unsafe.Pointer(etyp))
@@ -467,7 +464,7 @@ func SetFinalizer(obj any, finalizer any) {
 
 	// Move base forward if we've got an allocation header.
 	if !span.spanclass.noscan() && !heapBitsInSpan(span.elemsize) && span.spanclass.sizeclass() != 0 {
-		base += mallocHeaderSize
+		base += gc.MallocHeaderSize
 	}
 
 	if uintptr(e.data) != base {
@@ -484,11 +481,16 @@ func SetFinalizer(obj any, finalizer any) {
 		// switch to system stack and remove finalizer
 		systemstack(func() {
 			removefinalizer(e.data)
+
+			if debug.checkfinalizers != 0 {
+				clearFinalizerContext(uintptr(e.data))
+				KeepAlive(e.data)
+			}
 		})
 		return
 	}
 
-	if ftyp.Kind_&abi.KindMask != abi.Func {
+	if ftyp.Kind() != abi.Func {
 		throw("runtime.SetFinalizer: second argument is " + toRType(ftyp).string() + ", not a function")
 	}
 	ft := (*functype)(unsafe.Pointer(ftyp))
@@ -503,13 +505,13 @@ func SetFinalizer(obj any, finalizer any) {
 	case fint == etyp:
 		// ok - same type
 		goto okarg
-	case fint.Kind_&abi.KindMask == abi.Pointer:
+	case fint.Kind() == abi.Pointer:
 		if (fint.Uncommon() == nil || etyp.Uncommon() == nil) && (*ptrtype)(unsafe.Pointer(fint)).Elem == ot.Elem {
 			// ok - not same type, but both pointers,
 			// one or the other is unnamed, and same element type, so assignable.
 			goto okarg
 		}
-	case fint.Kind_&abi.KindMask == abi.Interface:
+	case fint.Kind() == abi.Interface:
 		ityp := (*interfacetype)(unsafe.Pointer(fint))
 		if len(ityp.Methods) == 0 {
 			// ok - satisfies empty interface
@@ -531,9 +533,13 @@ okarg:
 	// make sure we have a finalizer goroutine
 	createfing()
 
+	callerpc := sys.GetCallerPC()
 	systemstack(func() {
 		if !addfinalizer(e.data, (*funcval)(f.data), nret, fint, ot) {
 			throw("runtime.SetFinalizer: finalizer already set")
+		}
+		if debug.checkfinalizers != 0 {
+			setFinalizerContext(e.data, ot.Elem, callerpc, (*funcval)(f.data).fn)
 		}
 	})
 }

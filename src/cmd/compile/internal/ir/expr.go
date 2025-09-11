@@ -191,6 +191,7 @@ type CallExpr struct {
 	KeepAlive []*Name // vars to be kept alive until call returns
 	IsDDD     bool
 	GoDefer   bool // whether this call is part of a go or defer statement
+	NoInline  bool // whether this call must not be inlined
 }
 
 func NewCallExpr(pos src.XPos, op Op, fun Node, args []Node) *CallExpr {
@@ -212,7 +213,7 @@ func (n *CallExpr) SetOp(op Op) {
 		ODELETE,
 		OGETG, OGETCALLERSP,
 		OMAKE, OMAX, OMIN, OPRINT, OPRINTLN,
-		ORECOVER, ORECOVERFP:
+		ORECOVER:
 		n.op = op
 	}
 }
@@ -853,6 +854,10 @@ func IsAddressable(n Node) bool {
 //
 // calling StaticValue on the "int(y)" expression returns the outer
 // "g()" expression.
+//
+// NOTE: StaticValue can return a result with a different type than
+// n's type because it can traverse through OCONVNOP operations.
+// TODO: consider reapplying OCONVNOP operations to the result. See https://go.dev/cl/676517.
 func StaticValue(n Node) Node {
 	for {
 		switch n1 := n.(type) {
@@ -907,12 +912,12 @@ FindRHS:
 				break FindRHS
 			}
 		}
-		base.Fatalf("%v missing from LHS of %v", n, defn)
+		base.FatalfAt(defn.Pos(), "%v missing from LHS of %v", n, defn)
 	default:
 		return nil
 	}
 	if rhs == nil {
-		base.Fatalf("RHS is nil: %v", defn)
+		base.FatalfAt(defn.Pos(), "RHS is nil: %v", defn)
 	}
 
 	if Reassigned(n) {

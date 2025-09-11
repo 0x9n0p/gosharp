@@ -18,6 +18,7 @@ import (
 	"internal/testenv"
 	"math/big"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -195,7 +196,7 @@ func TestFIPSServerCipherSuites(t *testing.T) {
 				keyShares:                    []keyShare{generateKeyShare(CurveP256)},
 				supportedPoints:              []uint8{pointFormatUncompressed},
 				supportedVersions:            []uint16{VersionTLS12},
-				supportedSignatureAlgorithms: allowedSupportedSignatureAlgorithmsFIPS,
+				supportedSignatureAlgorithms: allowedSignatureAlgorithmsFIPS,
 			}
 			if isTLS13CipherSuite(id) {
 				clientHello.supportedVersions = []uint16{VersionTLS13}
@@ -262,15 +263,19 @@ func fipsHandshake(t *testing.T, clientConfig, serverConfig *Config) (clientErr,
 
 func TestFIPSServerSignatureAndHash(t *testing.T) {
 	defer func() {
-		testingOnlyForceClientHelloSignatureAlgorithms = nil
+		testingOnlySupportedSignatureAlgorithms = nil
 	}()
+	defer func(godebug string) {
+		os.Setenv("GODEBUG", godebug)
+	}(os.Getenv("GODEBUG"))
+	os.Setenv("GODEBUG", "tlssha1=1")
 
-	for _, sigHash := range defaultSupportedSignatureAlgorithms {
+	for _, sigHash := range defaultSupportedSignatureAlgorithms() {
 		t.Run(fmt.Sprintf("%v", sigHash), func(t *testing.T) {
 			serverConfig := testConfig.Clone()
 			serverConfig.Certificates = make([]Certificate, 1)
 
-			testingOnlyForceClientHelloSignatureAlgorithms = []SignatureScheme{sigHash}
+			testingOnlySupportedSignatureAlgorithms = []SignatureScheme{sigHash}
 
 			sigType, _, _ := typeAndHashFromSignatureScheme(sigHash)
 			switch sigType {

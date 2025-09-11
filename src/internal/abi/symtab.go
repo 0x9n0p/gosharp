@@ -56,8 +56,9 @@ const (
 	FuncID_mstart
 	FuncID_panicwrap
 	FuncID_rt0_go
-	FuncID_runFinalizersAndCleanups
 	FuncID_runtime_main
+	FuncID_runFinalizers
+	FuncID_runCleanups
 	FuncID_sigpanic
 	FuncID_systemstack
 	FuncID_systemstack_switch
@@ -78,6 +79,7 @@ const (
 	PCDATA_StackMapIndex = 1
 	PCDATA_InlTreeIndex  = 2
 	PCDATA_ArgLiveIndex  = 3
+	PCDATA_PanicBounds   = 4
 
 	FUNCDATA_ArgsPointerMaps    = 0
 	FUNCDATA_LocalsPointerMaps  = 1

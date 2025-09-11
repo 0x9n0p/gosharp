@@ -31,26 +31,20 @@ func Lines(s []byte) iter.Seq[[]byte] {
 	}
 }
 
-// explodeSeq returns an iterator over the runes in s.
-func explodeSeq(s []byte) iter.Seq[[]byte] {
-	return func(yield func([]byte) bool) {
-		for len(s) > 0 {
-			_, size := utf8.DecodeRune(s)
-			if !yield(s[:size:size]) {
-				return
-			}
-			s = s[size:]
-		}
-	}
-}
-
 // splitSeq is SplitSeq or SplitAfterSeq, configured by how many
 // bytes of sep to include in the results (none or all).
 func splitSeq(s, sep []byte, sepSave int) iter.Seq[[]byte] {
-	if len(sep) == 0 {
-		return explodeSeq(s)
-	}
 	return func(yield func([]byte) bool) {
+		if len(sep) == 0 {
+			for len(s) > 0 {
+				_, size := utf8.DecodeRune(s)
+				if !yield(s[:size:size]) {
+					return
+				}
+				s = s[size:]
+			}
+			return
+		}
 		for {
 			i := Index(s, sep)
 			if i < 0 {
@@ -123,11 +117,7 @@ func FieldsFuncSeq(s []byte, f func(rune) bool) iter.Seq[[]byte] {
 	return func(yield func([]byte) bool) {
 		start := -1
 		for i := 0; i < len(s); {
-			size := 1
-			r := rune(s[i])
-			if r >= utf8.RuneSelf {
-				r, size = utf8.DecodeRune(s[i:])
-			}
+			r, size := utf8.DecodeRune(s[i:])
 			if f(r) {
 				if start >= 0 {
 					if !yield(s[start:i:i]) {

@@ -419,7 +419,7 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 	return inner, nil
 }
 
-func decryptECHPayload(context *hpke.Receipient, hello, payload []byte) ([]byte, error) {
+func decryptECHPayload(context *hpke.Recipient, hello, payload []byte) ([]byte, error) {
 	outerAAD := bytes.Replace(hello[4:], payload, make([]byte, len(payload)), 1)
 	return context.Open(outerAAD, payload)
 }
@@ -578,7 +578,7 @@ func marshalEncryptedClientHelloConfigList(configs []EncryptedClientHelloKey) ([
 	return builder.Bytes()
 }
 
-func (c *Conn) processECHClientHello(outer *clientHelloMsg) (*clientHelloMsg, *echServerContext, error) {
+func (c *Conn) processECHClientHello(outer *clientHelloMsg, echKeys []EncryptedClientHelloKey) (*clientHelloMsg, *echServerContext, error) {
 	echType, echCiphersuite, configID, encap, payload, err := parseECHExt(outer.encryptedClientHello)
 	if err != nil {
 		if errors.Is(err, errInvalidECHExt) {
@@ -594,11 +594,11 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg) (*clientHelloMsg, *e
 		return outer, &echServerContext{inner: true}, nil
 	}
 
-	if len(c.config.EncryptedClientHelloKeys) == 0 {
+	if len(echKeys) == 0 {
 		return outer, nil, nil
 	}
 
-	for _, echKey := range c.config.EncryptedClientHelloKeys {
+	for _, echKey := range echKeys {
 		skip, config, err := parseECHConfig(echKey.Config)
 		if err != nil || skip {
 			c.sendAlert(alertInternalError)
@@ -613,7 +613,7 @@ func (c *Conn) processECHClientHello(outer *clientHelloMsg) (*clientHelloMsg, *e
 			return nil, nil, fmt.Errorf("tls: invalid EncryptedClientHelloKeys PrivateKey: %s", err)
 		}
 		info := append([]byte("tls ech\x00"), echKey.Config...)
-		hpkeContext, err := hpke.SetupReceipient(hpke.DHKEM_X25519_HKDF_SHA256, echCiphersuite.KDFID, echCiphersuite.AEADID, echPriv, info, encap)
+		hpkeContext, err := hpke.SetupRecipient(hpke.DHKEM_X25519_HKDF_SHA256, echCiphersuite.KDFID, echCiphersuite.AEADID, echPriv, info, encap)
 		if err != nil {
 			// attempt next trial decryption
 			continue

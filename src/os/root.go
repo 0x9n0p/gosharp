@@ -145,12 +145,24 @@ func (r *Root) Chmod(name string, mode FileMode) error {
 // See [Mkdir] for more details.
 //
 // If perm contains bits other than the nine least-significant bits (0o777),
-// OpenFile returns an error.
+// Mkdir returns an error.
 func (r *Root) Mkdir(name string, perm FileMode) error {
 	if perm&0o777 != perm {
 		return &PathError{Op: "mkdirat", Path: name, Err: errors.New("unsupported file mode")}
 	}
 	return rootMkdir(r, name, perm)
+}
+
+// MkdirAll creates a new directory in the root, along with any necessary parents.
+// See [MkdirAll] for more details.
+//
+// If perm contains bits other than the nine least-significant bits (0o777),
+// MkdirAll returns an error.
+func (r *Root) MkdirAll(name string, perm FileMode) error {
+	if perm&0o777 != perm {
+		return &PathError{Op: "mkdirat", Path: name, Err: errors.New("unsupported file mode")}
+	}
+	return rootMkdirAll(r, name, perm)
 }
 
 // Chown changes the numeric uid and gid of the named file in the root.
@@ -175,6 +187,12 @@ func (r *Root) Chtimes(name string, atime time.Time, mtime time.Time) error {
 // See [Remove] for more details.
 func (r *Root) Remove(name string) error {
 	return rootRemove(r, name)
+}
+
+// RemoveAll removes the named file or directory and any children that it contains.
+// See [RemoveAll] for more details.
+func (r *Root) RemoveAll(name string) error {
+	return rootRemoveAll(r, name)
 }
 
 // Stat returns a [FileInfo] describing the named file in the root.
@@ -230,6 +248,31 @@ func (r *Root) Symlink(oldname, newname string) error {
 	return rootSymlink(r, oldname, newname)
 }
 
+// ReadFile reads the named file in the root and returns its contents.
+// See [ReadFile] for more details.
+func (r *Root) ReadFile(name string) ([]byte, error) {
+	f, err := r.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readFileContents(statOrZero(f), f.Read)
+}
+
+// WriteFile writes data to the named file in the root, creating it if necessary.
+// See [WriteFile] for more details.
+func (r *Root) WriteFile(name string, data []byte, perm FileMode) error {
+	f, err := r.OpenFile(name, O_WRONLY|O_CREATE|O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err1 := f.Close(); err == nil {
+		err = err1
+	}
+	return err
+}
+
 func (r *Root) logOpen(name string) {
 	if log := testlog.Logger(); log != nil {
 		// This won't be right if r's name has changed since it was opened,
@@ -254,20 +297,20 @@ func (r *Root) logStat(name string) {
 //
 // "." components are removed, except in the last component.
 //
-// Path separators following the last component are preserved.
-func splitPathInRoot(s string, prefix, suffix []string) (_ []string, err error) {
+// Path separators following the last component are returned in suffixSep.
+func splitPathInRoot(s string, prefix, suffix []string) (_ []string, suffixSep string, err error) {
 	if len(s) == 0 {
-		return nil, errors.New("empty path")
+		return nil, "", errors.New("empty path")
 	}
 	if IsPathSeparator(s[0]) {
-		return nil, errPathEscapes
+		return nil, "", errPathEscapes
 	}
 
 	if runtime.GOOS == "windows" {
 		// Windows cleans paths before opening them.
 		s, err = rootCleanPath(s, prefix, suffix)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		prefix = nil
 		suffix = nil
@@ -283,13 +326,14 @@ func splitPathInRoot(s string, prefix, suffix []string) (_ []string, err error) 
 		}
 		parts = append(parts, s[i:j])
 		// Advance to the next component, or end of the path.
+		partEnd := j
 		for j < len(s) && IsPathSeparator(s[j]) {
 			j++
 		}
 		if j == len(s) {
 			// If this is the last path component,
 			// preserve any trailing path separators.
-			parts[len(parts)-1] = s[i:]
+			suffixSep = s[partEnd:]
 			break
 		}
 		if parts[len(parts)-1] == "." {
@@ -303,13 +347,13 @@ func splitPathInRoot(s string, prefix, suffix []string) (_ []string, err error) 
 		parts = parts[:len(parts)-1]
 	}
 	parts = append(parts, suffix...)
-	return parts, nil
+	return parts, suffixSep, nil
 }
 
 // FS returns a file system (an fs.FS) for the tree of files in the root.
 //
-// The result implements [io/fs.StatFS], [io/fs.ReadFileFS] and
-// [io/fs.ReadDirFS].
+// The result implements [io/fs.StatFS], [io/fs.ReadFileFS],
+// [io/fs.ReadDirFS], and [io/fs.ReadLinkFS].
 func (r *Root) FS() fs.FS {
 	return (*rootFS)(r)
 }
@@ -365,12 +409,28 @@ func (rfs *rootFS) ReadFile(name string) ([]byte, error) {
 	return readFileContents(statOrZero(f), f.Read)
 }
 
+func (rfs *rootFS) ReadLink(name string) (string, error) {
+	r := (*Root)(rfs)
+	if !isValidRootFSPath(name) {
+		return "", &PathError{Op: "readlink", Path: name, Err: ErrInvalid}
+	}
+	return r.Readlink(name)
+}
+
 func (rfs *rootFS) Stat(name string) (FileInfo, error) {
 	r := (*Root)(rfs)
 	if !isValidRootFSPath(name) {
 		return nil, &PathError{Op: "stat", Path: name, Err: ErrInvalid}
 	}
 	return r.Stat(name)
+}
+
+func (rfs *rootFS) Lstat(name string) (FileInfo, error) {
+	r := (*Root)(rfs)
+	if !isValidRootFSPath(name) {
+		return nil, &PathError{Op: "lstat", Path: name, Err: ErrInvalid}
+	}
+	return r.Lstat(name)
 }
 
 // isValidRootFSPath reports whether name is a valid filename to pass a Root.FS method.

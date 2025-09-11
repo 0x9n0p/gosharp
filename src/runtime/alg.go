@@ -144,7 +144,7 @@ func interhash(p unsafe.Pointer, h uintptr) uintptr {
 		// we want to report the struct, not the slice).
 		panic(errorString("hash of unhashable type " + toRType(t).string()))
 	}
-	if isDirectIface(t) {
+	if t.IsDirectIface() {
 		return c1 * typehash(t, unsafe.Pointer(&a.data), h^c0)
 	} else {
 		return c1 * typehash(t, a.data, h^c0)
@@ -171,7 +171,7 @@ func nilinterhash(p unsafe.Pointer, h uintptr) uintptr {
 		// See comment in interhash above.
 		panic(errorString("hash of unhashable type " + toRType(t).string()))
 	}
-	if isDirectIface(t) {
+	if t.IsDirectIface() {
 		return c1 * typehash(t, unsafe.Pointer(&a.data), h^c0)
 	} else {
 		return c1 * typehash(t, a.data, h^c0)
@@ -211,7 +211,7 @@ func typehash(t *_type, p unsafe.Pointer, h uintptr) uintptr {
 			return memhash(p, h, t.Size_)
 		}
 	}
-	switch t.Kind_ & abi.KindMask {
+	switch t.Kind() {
 	case abi.Float32:
 		return f32hash(p, h)
 	case abi.Float64:
@@ -247,74 +247,6 @@ func typehash(t *_type, p unsafe.Pointer, h uintptr) uintptr {
 		// Should never happen, as typehash should only be called
 		// with comparable types.
 		panic(errorString("hash of unhashable type " + toRType(t).string()))
-	}
-}
-
-func mapKeyError(t *maptype, p unsafe.Pointer) error {
-	if !t.HashMightPanic() {
-		return nil
-	}
-	return mapKeyError2(t.Key, p)
-}
-
-func mapKeyError2(t *_type, p unsafe.Pointer) error {
-	if t.TFlag&abi.TFlagRegularMemory != 0 {
-		return nil
-	}
-	switch t.Kind_ & abi.KindMask {
-	case abi.Float32, abi.Float64, abi.Complex64, abi.Complex128, abi.String:
-		return nil
-	case abi.Interface:
-		i := (*interfacetype)(unsafe.Pointer(t))
-		var t *_type
-		var pdata *unsafe.Pointer
-		if len(i.Methods) == 0 {
-			a := (*eface)(p)
-			t = a._type
-			if t == nil {
-				return nil
-			}
-			pdata = &a.data
-		} else {
-			a := (*iface)(p)
-			if a.tab == nil {
-				return nil
-			}
-			t = a.tab.Type
-			pdata = &a.data
-		}
-
-		if t.Equal == nil {
-			return errorString("hash of unhashable type " + toRType(t).string())
-		}
-
-		if isDirectIface(t) {
-			return mapKeyError2(t, unsafe.Pointer(pdata))
-		} else {
-			return mapKeyError2(t, *pdata)
-		}
-	case abi.Array:
-		a := (*arraytype)(unsafe.Pointer(t))
-		for i := uintptr(0); i < a.Len; i++ {
-			if err := mapKeyError2(a.Elem, add(p, i*a.Elem.Size_)); err != nil {
-				return err
-			}
-		}
-		return nil
-	case abi.Struct:
-		s := (*structtype)(unsafe.Pointer(t))
-		for _, f := range s.Fields {
-			if f.Name.IsBlank() {
-				continue
-			}
-			if err := mapKeyError2(f.Typ, add(p, f.Offset)); err != nil {
-				return err
-			}
-		}
-		return nil
-	default:
-		// Should never happen, keep this case for robustness.
-		return errorString("hash of unhashable type " + toRType(t).string())
 	}
 }
 
@@ -374,7 +306,7 @@ func efaceeq(t *_type, x, y unsafe.Pointer) bool {
 	if eq == nil {
 		panic(errorString("comparing uncomparable type " + toRType(t).string()))
 	}
-	if isDirectIface(t) {
+	if t.IsDirectIface() {
 		// Direct interface types are ptr, chan, map, func, and single-element structs/arrays thereof.
 		// Maps and funcs are not comparable, so they can't reach here.
 		// Ptrs, chans, and single-element items can be compared directly using ==.
@@ -391,7 +323,7 @@ func ifaceeq(tab *itab, x, y unsafe.Pointer) bool {
 	if eq == nil {
 		panic(errorString("comparing uncomparable type " + toRType(t).string()))
 	}
-	if isDirectIface(t) {
+	if t.IsDirectIface() {
 		// See comment in efaceeq.
 		return x == y
 	}

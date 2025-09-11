@@ -638,7 +638,7 @@ func TestHandshakeClientHelloRetryRequest(t *testing.T) {
 
 func TestHandshakeClientECDHERSAChaCha20(t *testing.T) {
 	config := testConfig.Clone()
-	config.CipherSuites = []uint16{TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305}
+	config.CipherSuites = []uint16{TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256}
 
 	test := &clientTest{
 		name:   "ECDHE-RSA-CHACHA20-POLY1305",
@@ -651,7 +651,7 @@ func TestHandshakeClientECDHERSAChaCha20(t *testing.T) {
 
 func TestHandshakeClientECDHEECDSAChaCha20(t *testing.T) {
 	config := testConfig.Clone()
-	config.CipherSuites = []uint16{TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305}
+	config.CipherSuites = []uint16{TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256}
 
 	test := &clientTest{
 		name:   "ECDHE-ECDSA-CHACHA20-POLY1305",
@@ -2655,8 +2655,8 @@ func TestClientHandshakeContextCancellation(t *testing.T) {
 	if err != context.Canceled {
 		t.Errorf("Unexpected client handshake error: %v", err)
 	}
-	if runtime.GOARCH == "wasm" {
-		t.Skip("conn.Close does not error as expected when called multiple times on WASM")
+	if runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
+		t.Skip("conn.Close does not error as expected when called multiple times on GOOS=js or GOOS=wasip1")
 	}
 	err = cli.Close()
 	if err == nil {

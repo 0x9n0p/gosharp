@@ -654,6 +654,12 @@ func (p *Parser) asmInstruction(op obj.As, cond string, a []obj.Addr) {
 				prog.RegTo2 = a[1].Reg
 				break
 			}
+
+			if arch.IsLoong64PRELD(op) {
+				prog.From = a[0]
+				prog.AddRestSource(a[1])
+				break
+			}
 		}
 		prog.From = a[0]
 		prog.To = a[1]
@@ -670,6 +676,11 @@ func (p *Parser) asmInstruction(op obj.As, cond string, a []obj.Addr) {
 				prog.From = a[0]
 				prog.To = a[1]
 				prog.RegTo2 = a[2].Reg
+
+			case arch.IsLoong64PRELD(op):
+				prog.From = a[0]
+				prog.AddRestSourceArgs([]obj.Addr{a[1], a[2]})
+
 			default:
 				prog.From = a[0]
 				prog.Reg = p.getRegister(prog, op, &a[1])
@@ -959,14 +970,6 @@ func (p *Parser) getConstantPseudo(pseudo string, addr *obj.Addr) int64 {
 func (p *Parser) getConstant(prog *obj.Prog, op obj.As, addr *obj.Addr) int64 {
 	if addr.Type != obj.TYPE_MEM || addr.Name != 0 || addr.Reg != 0 || addr.Index != 0 {
 		p.errorf("%s: expected integer constant; found %s", op, obj.Dconv(prog, addr))
-	}
-	return addr.Offset
-}
-
-// getImmediate checks that addr represents an immediate constant and returns its value.
-func (p *Parser) getImmediate(prog *obj.Prog, op obj.As, addr *obj.Addr) int64 {
-	if addr.Type != obj.TYPE_CONST || addr.Name != 0 || addr.Reg != 0 || addr.Index != 0 {
-		p.errorf("%s: expected immediate constant; found %s", op, obj.Dconv(prog, addr))
 	}
 	return addr.Offset
 }

@@ -834,8 +834,11 @@ func testClientInsecureTransport(t *testing.T, mode testMode) {
 	for _, insecure := range []bool{true, false} {
 		c.Transport.(*Transport).TLSClientConfig = &tls.Config{
 			InsecureSkipVerify: insecure,
+			NextProtos:         cst.tr.TLSClientConfig.NextProtos,
 		}
-		res, err := c.Get(ts.URL)
+		req, _ := NewRequest("GET", ts.URL, nil)
+		req.Header.Set("Connection", "close") // don't reuse this connection
+		res, err := c.Do(req)
 		if (err == nil) != insecure {
 			t.Errorf("insecure=%v: got unexpected err=%v", insecure, err)
 		}
@@ -1224,7 +1227,7 @@ func testClientTimeout(t *testing.T, mode testMode) {
 				t.Logf("timeout before response received")
 				continue
 			}
-			if runtime.GOOS == "windows" && strings.HasPrefix(runtime.GOARCH, "arm") {
+			if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
 				testenv.SkipFlaky(t, 43120)
 			}
 			t.Fatal(err)
@@ -1253,7 +1256,7 @@ func testClientTimeout(t *testing.T, mode testMode) {
 			t.Errorf("ReadAll error = %q; expected some context.DeadlineExceeded", err)
 		}
 		if got := ne.Error(); !strings.Contains(got, "(Client.Timeout") {
-			if runtime.GOOS == "windows" && strings.HasPrefix(runtime.GOARCH, "arm") {
+			if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
 				testenv.SkipFlaky(t, 43120)
 			}
 			t.Errorf("error string = %q; missing timeout substring", got)
@@ -1299,7 +1302,7 @@ func testClientTimeout_Headers(t *testing.T, mode testMode) {
 		t.Errorf("ReadAll error = %q; expected some context.DeadlineExceeded", err)
 	}
 	if got := ne.Error(); !strings.Contains(got, "Client.Timeout exceeded") {
-		if runtime.GOOS == "windows" && strings.HasPrefix(runtime.GOARCH, "arm") {
+		if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
 			testenv.SkipFlaky(t, 43120)
 		}
 		t.Errorf("error string = %q; missing timeout substring", got)
@@ -1547,6 +1550,8 @@ func testClientStripHeadersOnRepeatedRedirect(t *testing.T, mode testMode) {
 		if r.Host+r.URL.Path != "a.example.com/" {
 			if h := r.Header.Get("Authorization"); h != "" {
 				t.Errorf("on request to %v%v, Authorization=%q, want no header", r.Host, r.URL.Path, h)
+			} else if h := r.Header.Get("Proxy-Authorization"); h != "" {
+				t.Errorf("on request to %v%v, Proxy-Authorization=%q, want no header", r.Host, r.URL.Path, h)
 			}
 		}
 		// Follow a chain of redirects from a to b and back to a.
@@ -1575,6 +1580,7 @@ func testClientStripHeadersOnRepeatedRedirect(t *testing.T, mode testMode) {
 	req, _ := NewRequest("GET", proto+"://a.example.com/", nil)
 	req.Header.Add("Cookie", "foo=bar")
 	req.Header.Add("Authorization", "secretpassword")
+	req.Header.Add("Proxy-Authorization", "secretpassword")
 	res, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1957,6 +1963,61 @@ func testTransportBodyReadError(t *testing.T, mode testMode) {
 	if closeCalls != 1 {
 		t.Errorf("close calls = %d; want 1", closeCalls)
 	}
+}
+
+// Make sure the retries copies the GetBody in the request.
+func TestRedirectGetBody(t *testing.T) { run(t, testRedirectGetBody) }
+
+func testRedirectGetBody(t *testing.T, mode testMode) {
+	ts := newClientServerTest(t, mode, HandlerFunc(func(w ResponseWriter, r *Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if err = r.Body.Close(); err != nil {
+			t.Error(err)
+		}
+		if s := string(b); s != "hello" {
+			t.Errorf("expected hello, got %s", s)
+		}
+		if r.URL.Path == "/first" {
+			Redirect(w, r, "/second", StatusTemporaryRedirect)
+			return
+		}
+		w.Write([]byte("world"))
+	})).ts
+	c := ts.Client()
+	c.Transport = &roundTripperGetBody{c.Transport, t}
+	req, err := NewRequest("POST", ts.URL+"/first", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Do(req.WithT(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = res.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); s != "world" {
+		t.Fatalf("expected world, got %s", s)
+	}
+}
+
+type roundTripperGetBody struct {
+	Transport RoundTripper
+	t         *testing.T
+}
+
+func (r *roundTripperGetBody) RoundTrip(req *Request) (*Response, error) {
+	if req.GetBody == nil {
+		r.t.Error("missing Request.GetBody")
+	}
+	return r.Transport.RoundTrip(req)
 }
 
 type roundTripperWithoutCloseIdle struct{}

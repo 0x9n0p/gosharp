@@ -454,6 +454,11 @@ opSwitch:
 						// generate code.
 						cheap = true
 					}
+					if strings.HasPrefix(fn, "EscapeNonString[") {
+						// internal/abi.EscapeNonString[T] is a compiler intrinsic
+						// implemented in the escape analysis phase.
+						cheap = true
+					}
 				case "internal/runtime/sys":
 					switch fn {
 					case "GetCallerPC", "GetCallerSP":
@@ -470,12 +475,6 @@ opSwitch:
 						v.budget -= inlineExtraThrowCost
 						break opSwitch
 					case "panicrangestate":
-						cheap = true
-					}
-				case "hash/maphash":
-					if strings.HasPrefix(fn, "escapeForHash[") {
-						// hash/maphash.escapeForHash[T] is a compiler intrinsic
-						// implemented in the escape analysis phase.
 						cheap = true
 					}
 				}
@@ -606,10 +605,7 @@ opSwitch:
 		v.budget -= inlineExtraPanicCost
 
 	case ir.ORECOVER:
-		base.FatalfAt(n.Pos(), "ORECOVER missed typecheck")
-	case ir.ORECOVERFP:
-		// recover matches the argument frame pointer to find
-		// the right panic value, so it needs an argument frame.
+		// TODO: maybe we could allow inlining of recover() now?
 		v.reason = "call to recover"
 		return true
 
@@ -742,6 +738,17 @@ opSwitch:
 		if n.X.Op() == ir.OINDEX && isIndexingCoverageCounter(n.X) {
 			return false
 		}
+
+	case ir.OSLICE, ir.OSLICEARR, ir.OSLICESTR, ir.OSLICE3, ir.OSLICE3ARR:
+		n := n.(*ir.SliceExpr)
+
+		// Ignore superfluous slicing.
+		if n.Low != nil && n.Low.Op() == ir.OLITERAL && ir.Int64Val(n.Low) == 0 {
+			v.budget++
+		}
+		if n.High != nil && n.High.Op() == ir.OLEN && n.High.(*ir.UnaryExpr).X == n.X {
+			v.budget += 2
+		}
 	}
 
 	v.budget--
@@ -786,7 +793,7 @@ func inlineCallCheck(callerfn *ir.Func, call *ir.CallExpr) (bool, bool) {
 	if call.Op() != ir.OCALLFUNC {
 		return false, false
 	}
-	if call.GoDefer {
+	if call.GoDefer || call.NoInline {
 		return false, false
 	}
 
@@ -801,10 +808,10 @@ func inlineCallCheck(callerfn *ir.Func, call *ir.CallExpr) (bool, bool) {
 		}
 	}
 
-	// hash/maphash.escapeForHash[T] is a compiler intrinsic implemented
+	// internal/abi.EscapeNonString[T] is a compiler intrinsic implemented
 	// in the escape analysis phase.
-	if fn := ir.StaticCalleeName(call.Fun); fn != nil && fn.Sym().Pkg.Path == "hash/maphash" &&
-		strings.HasPrefix(fn.Sym().Name, "escapeForHash[") {
+	if fn := ir.StaticCalleeName(call.Fun); fn != nil && fn.Sym().Pkg.Path == "internal/abi" &&
+		strings.HasPrefix(fn.Sym().Name, "EscapeNonString[") {
 		return false, true
 	}
 
@@ -1117,12 +1124,18 @@ func mkinlcall(callerfn *ir.Func, n *ir.CallExpr, fn *ir.Func, bigCaller, closur
 			// Not a standard call.
 			return
 		}
-		if n.Fun.Op() != ir.OCLOSURE {
-			// Not a direct closure call.
+
+		var nf = n.Fun
+		// Skips ir.OCONVNOPs, see issue #73716.
+		for nf.Op() == ir.OCONVNOP {
+			nf = nf.(*ir.ConvExpr).X
+		}
+		if nf.Op() != ir.OCLOSURE {
+			// Not a direct closure call or one with type conversion.
 			return
 		}
 
-		clo := n.Fun.(*ir.ClosureExpr)
+		clo := nf.(*ir.ClosureExpr)
 		if !clo.Func.IsClosure() {
 			// enqueueFunc will handle non closures anyways.
 			return
@@ -1207,17 +1220,6 @@ func pruneUnusedAutos(ll []*ir.Name, vis *hairyVisitor) []*ir.Name {
 		s = append(s, n)
 	}
 	return s
-}
-
-// numNonClosures returns the number of functions in list which are not closures.
-func numNonClosures(list []*ir.Func) int {
-	count := 0
-	for _, fn := range list {
-		if fn.OClosure == nil {
-			count++
-		}
-	}
-	return count
 }
 
 func doList(list []ir.Node, do func(ir.Node) bool) bool {

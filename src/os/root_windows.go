@@ -77,6 +77,9 @@ func rootCleanPath(s string, prefix, suffix []string) (string, error) {
 	return s, nil
 }
 
+// sysfdType is the native type of a file handle
+// (int on Unix, syscall.Handle on Windows),
+// permitting helper functions to be written portably.
 type sysfdType = syscall.Handle
 
 // openRootNolog is OpenRoot.
@@ -110,23 +113,23 @@ func newRoot(fd syscall.Handle, name string) (*Root, error) {
 		fd:   fd,
 		name: name,
 	}}
-	r.root.cleanup = runtime.AddCleanup(r, func(f *root) { f.Close() }, r.root)
+	runtime.SetFinalizer(r.root, (*root).Close)
 	return r, nil
 }
 
 // openRootInRoot is Root.OpenRoot.
 func openRootInRoot(r *Root, name string) (*Root, error) {
-	fd, err := doInRoot(r, name, rootOpenDir)
+	fd, err := doInRoot(r, name, nil, rootOpenDir)
 	if err != nil {
 		return nil, &PathError{Op: "openat", Path: name, Err: err}
 	}
-	return newRoot(fd, name)
+	return newRoot(fd, joinPath(r.Name(), name))
 }
 
 // rootOpenFileNolog is Root.OpenFile.
 func rootOpenFileNolog(root *Root, name string, flag int, perm FileMode) (*File, error) {
-	fd, err := doInRoot(root, name, func(parent syscall.Handle, name string) (syscall.Handle, error) {
-		return openat(parent, name, flag, perm)
+	fd, err := doInRoot(root, name, nil, func(parent syscall.Handle, name string) (syscall.Handle, error) {
+		return openat(parent, name, uint64(flag), perm)
 	})
 	if err != nil {
 		return nil, &PathError{Op: "openat", Path: name, Err: err}
@@ -135,8 +138,8 @@ func rootOpenFileNolog(root *Root, name string, flag int, perm FileMode) (*File,
 	return newFile(fd, joinPath(root.Name(), name), "file", false), nil
 }
 
-func openat(dirfd syscall.Handle, name string, flag int, perm FileMode) (syscall.Handle, error) {
-	h, err := windows.Openat(dirfd, name, uint64(flag)|syscall.O_CLOEXEC|windows.O_NOFOLLOW_ANY, syscallMode(perm))
+func openat(dirfd syscall.Handle, name string, flag uint64, perm FileMode) (syscall.Handle, error) {
+	h, err := windows.Openat(dirfd, name, flag|syscall.O_CLOEXEC|windows.O_NOFOLLOW_ANY, syscallMode(perm))
 	if err == syscall.ELOOP || err == syscall.ENOTDIR {
 		if link, err := readReparseLinkAt(dirfd, name); err == nil {
 			return syscall.InvalidHandle, errSymlink(link)
@@ -209,7 +212,7 @@ func rootStat(r *Root, name string, lstat bool) (FileInfo, error) {
 		// merely the empirical evidence that Lstat behaves this way.
 		lstat = false
 	}
-	fi, err := doInRoot(r, name, func(parent syscall.Handle, n string) (FileInfo, error) {
+	fi, err := doInRoot(r, name, nil, func(parent syscall.Handle, n string) (FileInfo, error) {
 		fd, err := openat(parent, n, windows.O_OPEN_REPARSE, 0)
 		if err != nil {
 			return nil, err
@@ -271,7 +274,7 @@ func rootSymlink(r *Root, oldname, newname string) error {
 		flags |= windows.SYMLINKAT_RELATIVE
 	}
 
-	_, err := doInRoot(r, newname, func(parent sysfdType, name string) (struct{}, error) {
+	_, err := doInRoot(r, newname, nil, func(parent sysfdType, name string) (struct{}, error) {
 		return struct{}{}, windows.Symlinkat(oldname, parent, name, flags)
 	})
 	if err != nil {
@@ -385,4 +388,17 @@ func readlinkat(dirfd syscall.Handle, name string) (string, error) {
 	}
 	defer syscall.CloseHandle(fd)
 	return readReparseLinkHandle(fd)
+}
+
+func modeAt(parent syscall.Handle, name string) (FileMode, error) {
+	fd, err := openat(parent, name, windows.O_OPEN_REPARSE|windows.O_DIRECTORY, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer syscall.CloseHandle(fd)
+	fi, err := statHandle(name, fd)
+	if err != nil {
+		return 0, err
+	}
+	return fi.Mode(), nil
 }

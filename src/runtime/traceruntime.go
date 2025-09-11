@@ -457,7 +457,7 @@ func (tl traceLocker) GoPreempt() {
 
 // GoStop emits a GoStop event with the provided reason.
 func (tl traceLocker) GoStop(reason traceGoStopReason) {
-	tl.eventWriter(tracev2.GoRunning, tracev2.ProcRunning).event(tracev2.EvGoStop, traceArg(trace.goStopReasons[tl.gen%2][reason]), tl.stack(1))
+	tl.eventWriter(tracev2.GoRunning, tracev2.ProcRunning).event(tracev2.EvGoStop, trace.goStopReasons[tl.gen%2][reason], tl.stack(0))
 }
 
 // GoPark emits a GoBlock event with the provided reason.
@@ -465,7 +465,7 @@ func (tl traceLocker) GoStop(reason traceGoStopReason) {
 // TODO(mknyszek): Replace traceBlockReason with waitReason. It's silly
 // that we have both, and waitReason is way more descriptive.
 func (tl traceLocker) GoPark(reason traceBlockReason, skip int) {
-	tl.eventWriter(tracev2.GoRunning, tracev2.ProcRunning).event(tracev2.EvGoBlock, traceArg(trace.goBlockReasons[tl.gen%2][reason]), tl.stack(skip))
+	tl.eventWriter(tracev2.GoRunning, tracev2.ProcRunning).event(tracev2.EvGoBlock, trace.goBlockReasons[tl.gen%2][reason], tl.stack(skip))
 }
 
 // GoUnpark emits a GoUnblock event.
@@ -574,7 +574,9 @@ func (tl traceLocker) HeapAlloc(live uint64) {
 // HeapGoal reads the current heap goal and emits a HeapGoal event.
 func (tl traceLocker) HeapGoal() {
 	heapGoal := gcController.heapGoal()
-	if heapGoal == ^uint64(0) {
+	// The heapGoal calculations will result in strange numbers if the GC if off. See go.dev/issue/63864.
+	// Check gcPercent before using the heapGoal in the trace.
+	if heapGoal == ^uint64(0) || gcController.gcPercent.Load() < 0 {
 		// Heap-based triggering is disabled.
 		heapGoal = 0
 	}

@@ -51,6 +51,11 @@ func AddLargeConst(a uint64, out []uint64) {
 	out[9] = a - 32769
 }
 
+func AddLargeConst2(a int, out []int) {
+	// loong64: -"ADDVU","ADDV16"
+	out[0] = a + 0x10000
+}
+
 // ----------------- //
 //    Subtraction    //
 // ----------------- //
@@ -91,6 +96,10 @@ func SubFromConst(a int) int {
 }
 
 func SubFromConstNeg(a int) int {
+	// arm64: "ADD\t\\$40"
+	// loong64: "ADDV[U]\t\\$40"
+	// mips: "ADD[U]\t\\$40"
+	// mips64: "ADDV[U]\t\\$40"
 	// ppc64x: `ADD\t[$]40,\sR[0-9]+,\sR`
 	// riscv64: "ADDI\t\\$40",-"NEG"
 	c := 40 - (-a)
@@ -98,6 +107,10 @@ func SubFromConstNeg(a int) int {
 }
 
 func SubSubFromConst(a int) int {
+	// arm64: "ADD\t\\$20"
+	// loong64: "ADDV[U]\t\\$20"
+	// mips: "ADD[U]\t\\$20"
+	// mips64: "ADDV[U]\t\\$20"
 	// ppc64x: `ADD\t[$]20,\sR[0-9]+,\sR`
 	// riscv64: "ADDI\t\\$20",-"NEG"
 	c := 40 - (20 - a)
@@ -112,6 +125,10 @@ func AddSubFromConst(a int) int {
 }
 
 func NegSubFromConst(a int) int {
+	// arm64: "SUB\t\\$20"
+	// loong64: "ADDV[U]\t\\$-20"
+	// mips: "ADD[U]\t\\$-20"
+	// mips64: "ADDV[U]\t\\$-20"
 	// ppc64x: `ADD\t[$]-20,\sR[0-9]+,\sR`
 	// riscv64: "ADDI\t\\$-20"
 	c := -(20 - a)
@@ -119,6 +136,10 @@ func NegSubFromConst(a int) int {
 }
 
 func NegAddFromConstNeg(a int) int {
+	// arm64: "SUB\t\\$40","NEG"
+	// loong64: "ADDV[U]\t\\$-40","SUBV"
+	// mips: "ADD[U]\t\\$-40","SUB"
+	// mips64: "ADDV[U]\t\\$-40","SUBV"
 	// ppc64x: `SUBC\tR[0-9]+,\s[$]40,\sR`
 	// riscv64: "ADDI\t\\$-40","NEG"
 	c := -(-40 + a)
@@ -127,6 +148,10 @@ func NegAddFromConstNeg(a int) int {
 
 func SubSubNegSimplify(a, b int) int {
 	// amd64:"NEGQ"
+	// arm64:"NEG"
+	// loong64:"SUBV"
+	// mips:"SUB"
+	// mips64:"SUBV"
 	// ppc64x:"NEG"
 	// riscv64:"NEG",-"SUB"
 	r := (a - b) - a
@@ -135,6 +160,10 @@ func SubSubNegSimplify(a, b int) int {
 
 func SubAddSimplify(a, b int) int {
 	// amd64:-"SUBQ",-"ADDQ"
+	// arm64:-"SUB",-"ADD"
+	// loong64:-"SUBV",-"ADDV"
+	// mips:-"SUB",-"ADD"
+	// mips64:-"SUBV",-"ADDV"
 	// ppc64x:-"SUB",-"ADD"
 	// riscv64:-"SUB",-"ADD"
 	r := a + (b - a)
@@ -143,6 +172,10 @@ func SubAddSimplify(a, b int) int {
 
 func SubAddSimplify2(a, b, c int) (int, int, int, int, int, int) {
 	// amd64:-"ADDQ"
+	// arm64:-"ADD"
+	// mips:"SUB",-"ADD"
+	// mips64:"SUBV",-"ADDV"
+	// loong64:"SUBV",-"ADDV"
 	r := (a + b) - (a + c)
 	// amd64:-"ADDQ"
 	r1 := (a + b) - (c + a)
@@ -151,6 +184,10 @@ func SubAddSimplify2(a, b, c int) (int, int, int, int, int, int) {
 	// amd64:-"ADDQ"
 	r3 := (b + a) - (c + a)
 	// amd64:-"SUBQ"
+	// arm64:-"SUB"
+	// mips:"ADD",-"SUB"
+	// mips64:"ADDV",-"SUBV"
+	// loong64:"ADDV",-"SUBV"
 	r4 := (a - c) + (c + b)
 	// amd64:-"SUBQ"
 	r5 := (a - c) + (b + c)
@@ -159,6 +196,10 @@ func SubAddSimplify2(a, b, c int) (int, int, int, int, int, int) {
 
 func SubAddNegSimplify(a, b int) int {
 	// amd64:"NEGQ",-"ADDQ",-"SUBQ"
+	// arm64:"NEG",-"ADD",-"SUB"
+	// loong64:"SUBV",-"ADDV"
+	// mips:"SUB",-"ADD"
+	// mips64:"SUBV",-"ADDV"
 	// ppc64x:"NEG",-"ADD",-"SUB"
 	// riscv64:"NEG",-"ADD",-"SUB"
 	r := a - (b + a)
@@ -167,6 +208,10 @@ func SubAddNegSimplify(a, b int) int {
 
 func AddAddSubSimplify(a, b, c int) int {
 	// amd64:-"SUBQ"
+	// arm64:"ADD",-"SUB"
+	// loong64:"ADDV",-"SUBV"
+	// mips:"ADD",-"SUB"
+	// mips64:"ADDV",-"SUBV"
 	// ppc64x:-"SUB"
 	// riscv64:"ADD","ADD",-"SUB"
 	r := a + (b + (c - a))
@@ -188,6 +233,7 @@ func Pow2Muls(n1, n2 int) (int, int) {
 	// 386:"SHLL\t[$]5",-"IMULL"
 	// arm:"SLL\t[$]5",-"MUL"
 	// arm64:"LSL\t[$]5",-"MUL"
+	// loong64:"SLLV\t[$]5",-"MULV"
 	// ppc64x:"SLD\t[$]5",-"MUL"
 	a := n1 * 32
 
@@ -195,6 +241,7 @@ func Pow2Muls(n1, n2 int) (int, int) {
 	// 386:"SHLL\t[$]6",-"IMULL"
 	// arm:"SLL\t[$]6",-"MUL"
 	// arm64:`NEG\sR[0-9]+<<6,\sR[0-9]+`,-`LSL`,-`MUL`
+	// loong64:"SLLV\t[$]6",-"MULV"
 	// ppc64x:"SLD\t[$]6","NEG\\sR[0-9]+,\\sR[0-9]+",-"MUL"
 	b := -64 * n2
 
@@ -215,11 +262,13 @@ func Mul_96(n int) int {
 	// 386:`SHLL\t[$]5`,`LEAL\t\(.*\)\(.*\*2\),`,-`IMULL`
 	// arm64:`LSL\t[$]5`,`ADD\sR[0-9]+<<1,\sR[0-9]+`,-`MUL`
 	// arm:`SLL\t[$]5`,`ADD\sR[0-9]+<<1,\sR[0-9]+`,-`MUL`
+	// loong64:"SLLV\t[$]5","ALSLV\t[$]1,"
 	// s390x:`SLD\t[$]5`,`SLD\t[$]6`,-`MULLD`
 	return n * 96
 }
 
 func Mul_n120(n int) int {
+	// loong64:"SLLV\t[$]3","SLLV\t[$]7","SUBVU",-"MULV"
 	// s390x:`SLD\t[$]3`,`SLD\t[$]7`,-`MULLD`
 	return n * -120
 }
@@ -268,6 +317,18 @@ func MergeMuls5(a, n int) int {
 	// 386:"ADDL\t[$]-19",-"IMULL\t[$]19"
 	// ppc64x:"ADD\t[$]-19",-"MULLD\t[$]19"
 	return a*n - 19*n // (a-19)n
+}
+
+// Multiplications folded negation
+
+func FoldNegMul(a int) int {
+	// loong64:"SUBVU","ALSLV\t[$]2","ALSLV\t[$]1"
+	return (-a) * 11
+}
+
+func Fold2NegMul(a, b int) int {
+	// loong64:"MULV",-"SUBVU\tR[0-9], R0,"
+	return (-a) * (-b)
 }
 
 // -------------- //
@@ -568,6 +629,11 @@ func AddMul(x int) int {
 	return 2*x + 1
 }
 
+func AddShift(a, b int) int {
+	// loong64: "ALSLV"
+	return a + (b << 4)
+}
+
 func MULA(a, b, c uint32) (uint32, uint32, uint32) {
 	// arm:`MULA`,-`MUL\s`
 	// arm64:`MADDW`,-`MULW`
@@ -649,7 +715,7 @@ func constantFold2(i0, j0, i1, j1 int) (int, int) {
 }
 
 func constantFold3(i, j int) int {
-	// arm64: "MOVD\t[$]30","MUL",-"ADD",-"LSL"
+	// arm64: "LSL\t[$]5,","SUB\tR[0-9]+<<1,",-"ADD"
 	// ppc64x:"MULLD\t[$]30","MULLD"
 	r := (5 * i) * (6 * j)
 	return r

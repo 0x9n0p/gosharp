@@ -52,6 +52,21 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	cgocheck mode can be enabled using GOEXPERIMENT (which
 	requires a rebuild), see https://pkg.go.dev/internal/goexperiment for details.
 
+	checkfinalizers: setting checkfinalizers=1 causes the garbage collector to run
+	multiple partial non-parallel stop-the-world collections to identify common issues with
+	finalizers and cleanups, like those listed at
+	https://go.dev/doc/gc-guide#Finalizers_cleanups_and_weak_pointers. If a potential issue
+	is found, the program will terminate with a description of all potential issues, the
+	associated values, and a list of those values' finalizers and cleanups, including where
+	they were created. It also adds tracking for tiny blocks to help diagnose issues with
+	those as well. The analysis performed during the partial collection is conservative.
+	Notably, it flags any path back to the original object from the cleanup function,
+	cleanup arguments, or finalizer function as a potential issue, even if that path might
+	be severed sometime later during execution (though this is not a recommended pattern).
+	This mode also produces one line of output to stderr every GC cycle with information
+	about the finalizer and cleanup queue lengths. Lines produced by this mode start with
+	"checkfinalizers:".
+
 	decoratemappings: controls whether the Go runtime annotates OS
 	anonymous memory mappings with context about their purpose. These
 	annotations appear in /proc/self/maps and /proc/self/smaps as
@@ -165,15 +180,6 @@ It is a comma-separated list of name=val pairs setting these named variables:
 
 	panicnil: setting panicnil=1 disables the runtime error when calling panic with nil
 	interface value or an untyped nil.
-
-	runtimecontentionstacks: setting runtimecontentionstacks=1 enables inclusion of call stacks
-	related to contention on runtime-internal locks in the "mutex" profile, subject to the
-	MutexProfileFraction setting. When runtimecontentionstacks=0, contention on
-	runtime-internal locks will report as "runtime._LostContendedRuntimeLock". When
-	runtimecontentionstacks=1, the call stacks will correspond to the unlock call that released
-	the lock. But instead of the value corresponding to the amount of contention that call
-	stack caused, it corresponds to the amount of time the caller of unlock had to wait in its
-	original call to lock. A future release is expected to align those and remove this setting.
 
 	invalidptr: invalidptr=1 (the default) causes the garbage collector and stack
 	copier to crash the program if an invalid pointer value (for example, 1)
